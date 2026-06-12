@@ -373,6 +373,23 @@ def check_result_type(result: Value, expected: object, node: fx.Node, idx: int) 
             TORCH_TO_COREAI_DTYPE[torch.complex64](),
             TORCH_TO_COREAI_DTYPE[torch.complex32](),
         ]
+    elif expected.dtype == torch.bfloat16:
+        # After the f16 cast pass, fp32 nodes are rewritten to f16 but the
+        # actual op may still produce bf16 if its source operands kept their
+        # bf16 element type. Accept f16 as a valid narrowing of bf16.
+        narrow_expected_dtypes = [
+            TORCH_TO_COREAI_DTYPE[torch.bfloat16](),
+            TORCH_TO_COREAI_DTYPE[torch.float16](),
+        ]
+    elif expected.dtype == torch.float16:
+        # Mirror of the bf16 case above: when the f16 cast pass rewrites a
+        # node's meta to f16 but the lowering materializes a bf16 result
+        # (because its source operand's element type was not rewritten),
+        # accept bf16 as well. Both are 16-bit floating types.
+        narrow_expected_dtypes = [
+            TORCH_TO_COREAI_DTYPE[torch.float16](),
+            TORCH_TO_COREAI_DTYPE[torch.bfloat16](),
+        ]
 
     expected_type = get_tensor_type(expected)
     if actual.rank != expected_type.rank:

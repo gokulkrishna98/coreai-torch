@@ -356,6 +356,61 @@ class TestConvertToCoreaiNoOptimization:
         )
 
     @pytest.mark.ir
+    def test_bf16_meta_with_f16_actual_passes_check_result_type(self) -> None:
+        """Regression: a node whose FX meta['val'] dtype was rewritten to
+        torch.float16 (e.g. by an upstream fp32->fp16 cast pass) but whose
+        lowering still materializes a bf16 result must pass
+        check_result_type. Mirrors the situation produced by the coreai-opt
+        16-bit cast pass on a model that mixes f32 and bf16 sub-graphs (e.g.
+        coreml_examples' CastBF16ToF32 toy). See rdar://179162503."""
+
+        class CastBF16ToF32Module(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                x_bf16 = x.to(torch.bfloat16)
+                w = x_bf16 + torch.tensor([1.0], dtype=torch.bfloat16)
+                w_f32 = w.to(torch.float32)
+                return torch.sum(w_f32).to(x.dtype)
+
+        x = torch.rand(2, 4, 3, dtype=torch.float32)
+        program = torch.export.export(
+            CastBF16ToF32Module(), args=(x,)
+        ).run_decompositions()
+
+        # Simulate what the coreai-opt 16-bit cast pass does: rewrite the
+        # element type of every fake-tensor in meta['val'] from bf16 to f16.
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        def _to_f16(val: object) -> object:
+            if isinstance(val, FakeTensor) and val.dtype == torch.bfloat16:
+                return val.to(torch.float16)
+            return val
+
+        for node in program.graph_module.graph.nodes:
+            if "val" in node.meta:
+                v = node.meta["val"]
+                if isinstance(v, (list, tuple)):
+                    node.meta["val"] = type(v)(_to_f16(e) for e in v)
+                else:
+                    node.meta["val"] = _to_f16(v)
+
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        # Must convert without 'dtype bf16 vs f16' from check_result_type.
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %arg0: tensor<2x4x3xf32>
+                // CHECK:         coreai.constant dense<{{.*}}> : tensor<1xbf16>
+                // CHECK:         coreai.cast %arg0 : tensor<2x4x3xf32> to tensor<2x4x3xf16>
+                // CHECK:         coreai.cast %{{.*}} : tensor<2x4x3xf16> to tensor<2x4x3xf32>
+                // CHECK:         coreai.cast %{{.*}} : tensor<1xbf16> to tensor<1xf32>
+                // CHECK:         coreai.decomposable.broadcasting_add
+                // CHECK:         coreai.reduce_sum
+                // CHECK:         coreai.output
+            """,
+        )
+
+    @pytest.mark.ir
     @pytest.mark.parametrize(
         "fp8_dtype,coreai_dtype",
         [
