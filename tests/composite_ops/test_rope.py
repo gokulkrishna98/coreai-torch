@@ -76,13 +76,15 @@ if platform.system() == "Darwin":
     import mlx.core  # type: ignore[import-not-found, unused-ignore]
     import mlx.core.fast  # type: ignore[import-not-found, unused-ignore]
 
-from coreai_torch import ExternalizeSpec, TorchConverter, get_decomp_table
+from coreai_torch import ExternalizeSpec, get_decomp_table
 from coreai_torch.composite_ops import RoPE
 from coreai_torch.composite_ops._rope import _compute_angle, rope
 
 from ..utils import (
     _mlx_array_to_numpy_array,
     _torch_tensor_to_numpy_array,
+    convert_via_markers,
+    convert_via_module,
     filecheck_pattern,
     validate_numerical_output,
 )
@@ -1044,6 +1046,9 @@ class TestTorchRoPEConversion:
             f"'interleaved': {str(interleaved).lower()}, 'version': 1}}"
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("scale", [1.0, 2.0])
     @pytest.mark.parametrize("base", [10000.0, 10.0])
@@ -1059,6 +1064,7 @@ class TestTorchRoPEConversion:
         interleaved: bool,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Test rope externalization IR with input only (no optional tensors)."""
         batch_size = 2
@@ -1084,17 +1090,12 @@ class TestTorchRoPEConversion:
             batch_dim = torch.export.Dim("batch_size", min=1, max=32)
             q_dim = torch.export.Dim("q_len", min=1, max=64)
             export_dynamic_shapes = {"x": {0: batch_dim, 2: q_dim}}
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x,), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -1114,6 +1115,9 @@ class TestTorchRoPEConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("scale", [1.0, 2.0])
     @pytest.mark.parametrize("base", [10000.0, 10.0])
     @pytest.mark.parametrize("dims", [None, 2, 8])
@@ -1128,6 +1132,7 @@ class TestTorchRoPEConversion:
         interleaved: bool,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Test rope externalization with input only (no optional tensors)."""
         batch_size = 2
@@ -1153,17 +1158,12 @@ class TestTorchRoPEConversion:
             batch_dim = torch.export.Dim("batch_size", min=1, max=32)
             q_dim = torch.export.Dim("q_len", min=1, max=64)
             export_dynamic_shapes = {"x": {0: batch_dim, 2: q_dim}}
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x,), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x)
@@ -1179,6 +1179,9 @@ class TestTorchRoPEConversion:
             x=x,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
@@ -1186,10 +1189,7 @@ class TestTorchRoPEConversion:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     def test_rope_with_cos_and_sin_ir(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization IR with pre-computed cos and sin inputs."""
         batch_size = 2
@@ -1223,17 +1223,12 @@ class TestTorchRoPEConversion:
                 "cos": {0: q_dim},
                 "sin": {0: q_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, cos, sin), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, cos, sin), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -1255,16 +1250,16 @@ class TestTorchRoPEConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     async def test_rope_with_cos_and_sin(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization with pre-computed cos and sin inputs."""
         batch_size = 2
@@ -1298,17 +1293,12 @@ class TestTorchRoPEConversion:
                 "cos": {0: q_dim},
                 "sin": {0: q_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, cos, sin), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, cos, sin), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x, cos, sin)
@@ -1326,6 +1316,9 @@ class TestTorchRoPEConversion:
             sin=sin,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
@@ -1333,10 +1326,7 @@ class TestTorchRoPEConversion:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     def test_rope_with_freqs_ir(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization IR with pre-computed frequencies (Llama3/YaRN style)."""
         batch_size = 2
@@ -1369,17 +1359,12 @@ class TestTorchRoPEConversion:
                 "x": {0: batch_dim, 2: q_dim},
                 "freqs": {},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, freqs), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, freqs), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -1393,16 +1378,16 @@ class TestTorchRoPEConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     async def test_rope_with_freqs(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization with pre-computed frequencies (Llama3/YaRN style)."""
         batch_size = 2
@@ -1435,17 +1420,12 @@ class TestTorchRoPEConversion:
                 "x": {0: batch_dim, 2: q_dim},
                 "freqs": {},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, freqs), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, freqs), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x, freqs)
@@ -1462,6 +1442,9 @@ class TestTorchRoPEConversion:
             freqs=freqs,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
@@ -1469,10 +1452,7 @@ class TestTorchRoPEConversion:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     def test_rope_with_offset_ir(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization IR with tensor offset (KV-cache decoding)."""
         batch_size = 2
@@ -1500,17 +1480,12 @@ class TestTorchRoPEConversion:
                 "x": {0: batch_dim, 2: q_dim},
                 "offset": {0: batch_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, offset), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, offset), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -1531,16 +1506,16 @@ class TestTorchRoPEConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     async def test_rope_with_offset(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization with tensor offset (KV-cache decoding)."""
         batch_size = 2
@@ -1568,17 +1543,12 @@ class TestTorchRoPEConversion:
                 "x": {0: batch_dim, 2: q_dim},
                 "offset": {0: batch_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, offset), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, offset), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x, offset)
@@ -1595,6 +1565,9 @@ class TestTorchRoPEConversion:
             offset=offset,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
@@ -1602,10 +1575,7 @@ class TestTorchRoPEConversion:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     def test_rope_with_position_ids_ir(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization IR with explicit position indices."""
         batch_size = 2
@@ -1635,17 +1605,12 @@ class TestTorchRoPEConversion:
                 "x": {0: batch_dim, 2: q_dim},
                 "position_ids": {0: batch_dim, 1: q_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, position_ids), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, position_ids), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -1666,16 +1631,16 @@ class TestTorchRoPEConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dims", [None, 2, 8])
     @pytest.mark.parametrize("interleaved", [True, False])
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     async def test_rope_with_position_ids(
-        dims: int | None,
-        interleaved: bool,
-        dynamic: bool,
-        dtype: torch.dtype,
+        dims: int | None, interleaved: bool, dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Test rope externalization with explicit position indices."""
         batch_size = 2
@@ -1705,17 +1670,12 @@ class TestTorchRoPEConversion:
                 "x": {0: batch_dim, 2: q_dim},
                 "position_ids": {0: batch_dim, 1: q_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x, position_ids), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x, position_ids), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x, position_ids)
@@ -1736,8 +1696,11 @@ class TestTorchRoPEConversion:
 class TestTorchRoPEConversionDetails:
     """Test Core AI graph details that are vital for numerics."""
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @staticmethod
-    def test_rope_compute_precision() -> None:
+    def test_rope_compute_precision(convert) -> None:
         """Test the rope is computed in fp32 precision."""
         batch_size = 2
         context_size = 1024
@@ -1760,17 +1723,12 @@ class TestTorchRoPEConversionDetails:
 
         model = WrapperModel().eval()
         args = (input_tensor, offset)
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=args
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(m, args=args).run_decompositions(
+                get_decomp_table()
+            ),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         # Verify that cos/sin operations are performed in fp32 and then cast to fp16
@@ -1803,9 +1761,12 @@ class TestTorchRoPEConversionDetails:
             "Could not find the sequence of cos/sin followed by cast in the IR"
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @staticmethod
-    def test_rope_derived_symbol_dynamic_shapes() -> None:
+    def test_rope_derived_symbol_dynamic_shapes(convert) -> None:
         """Test that externalized RoPE handles derived symbolic shapes at the op boundary.
 
         When two tensors with independent dynamic sequence lengths are
@@ -1845,17 +1806,12 @@ class TestTorchRoPEConversionDetails:
             "x1": {0: batch_dim, 2: q1_dim},
             "x2": {0: batch_dim, 2: q2_dim},
         }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x1, x2), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x1, x2), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRoPEConversion._make_externalize_spec()],
         )
 
         # The inner graph must have dynamic batch and seq_len dims.

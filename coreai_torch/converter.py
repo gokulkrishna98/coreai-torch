@@ -61,6 +61,7 @@ from ._utils import (
 )
 from ._validate import validate_exported_program
 from .externalize import (
+    ExternalizeMarkers,
     ExternalizeSpec,
     _ExportedModule,
     _finalize_module_export,
@@ -85,6 +86,7 @@ class _StagedEntry:
     module: torch.nn.Module | None = None
     export_fn: Callable[..., Any] | None = None
     externalize_modules: list[type | ExternalizeSpec] | None = None
+    externalize_markers: ExternalizeMarkers | None = None
 
 
 class Context(_CoreAIAuthoringContext):
@@ -168,19 +170,22 @@ class TorchConverter:
         output_names: Sequence[str] | None = None,
         state_names: Sequence[str] | None = None,
         entrypoint_name: str = "main",
+        externalize_markers: ExternalizeMarkers | None = None,
     ) -> Self:
-        """Stage a pre-exported ExportedProgram for conversion.
+        """Stage a pre-exported ``ExportedProgram`` for conversion.
 
         The caller is responsible for calling ``torch.export.export()`` and
         ``run_decompositions()`` before passing the program.
 
         Args:
-            input_names: Non-stateful forward() arg names only.
-            output_names: Return value names only (not mutation outputs).
-            state_names: One name per state, applied to both input and
-                mutation output. Order: buffers (registration order), then
-                mutated user inputs (signature order). Defaults to FX
-                placeholder names when not provided.
+            input_names: Non-stateful ``forward()`` arg names.
+            output_names: Return value names (not mutation outputs).
+            state_names: One name per state (buffers then mutated inputs).
+                Defaults to FX placeholder names.
+            externalize_markers: Handle from
+                :func:`coreai_torch.mark_for_externalization`. When set,
+                emits composite ``coreai.graph``s for the patched call
+                sites in ``exported_program``.
 
         Returns ``self`` for chaining.
         """
@@ -200,6 +205,7 @@ class TorchConverter:
                 output_names=output_names or [],
                 state_names=state_names or [],
                 entrypoint_name=entrypoint_name,
+                externalize_markers=externalize_markers,
             )
         )
         return self
@@ -270,17 +276,14 @@ class TorchConverter:
         )
         return self
 
-    def _run_externalize_pipeline(self) -> None:
-        """Mark, re-export, and export each externalized submodule.
+    def _run_externalize_pipeline_from_module(self) -> None:
+        """Externalize from a live ``nn.Module`` + ``export_fn`` (Phases 1-5).
 
-        The model is patched temporarily and always restored, even on error.
-
-        Steps:
-        1. Mark matching submodules with custom ops via ``_mark_externalize``.
-        2. Re-export the whole model (now containing custom op calls).
-        3. For each marked submodule, export it standalone and decompose.
-        4. Store results in ``self._externalized_modules`` and update
-           ``self.exported_program`` to the re-exported whole-model program.
+        Used by :meth:`add_pytorch_module`. Marks matching submodules with
+        custom ops, re-exports the whole model, sub-exports each marked
+        submodule on its own, and stashes the results in
+        ``self._externalized_modules`` for :meth:`_perform_externalization`
+        to emit. The model patch is always restored (``try/finally``).
         """
         assert self._module is not None
         assert self._export_fn is not None
@@ -329,6 +332,37 @@ class TorchConverter:
             self.exported_program = whole_ep
         finally:
             _restore_externalized(self._module)
+
+    def _run_externalize_pipeline_from_markers(
+        self, markers: ExternalizeMarkers, exported_program: ExportedProgram
+    ) -> None:
+        """Externalize from a user-supplied, pre-marked ``ExportedProgram``.
+
+        Used by :meth:`add_exported_program` when ``externalize_markers`` is
+        set. The user already ran Phases 1-2 (mark + export) inside the
+        markers' ``with`` block, so ``exported_program`` already contains
+        custom-op call sites and the model is still patched. We just sub-export
+        each marked submodule and stash results for
+        :meth:`_perform_externalization`. The user owns restoration.
+        """
+        model = markers.model
+        preps: Iterator[_PreparedModule] = _prepare_externalized(
+            model, exported_program
+        )
+        exts: list[_ExportedModule] = []
+        with self._progress_bar.stream("Externalizing submodules") as advance:
+            for prep in preps:
+                try:
+                    inner_ep = _torch_export_module(prep)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to export externalized submodule '{prep.name}': {e}"
+                    ) from e
+                inner_ep = inner_ep.run_decompositions()
+                exts.append(_finalize_module_export(prep, inner_ep))
+                advance()
+        self._externalized_modules = exts
+        self.exported_program = exported_program
 
     def _perform_externalization(self, context) -> None:
         """Emit externalized submodule graphs and register their lowerings.
@@ -908,7 +942,14 @@ class TorchConverter:
                             self._module = entry.module
                             self._export_fn = entry.export_fn
                             self._externalize_modules = entry.externalize_modules
-                            self._run_externalize_pipeline()
+                            self._run_externalize_pipeline_from_module()
+                            self._perform_externalization(module.context)
+
+                        # Handle externalization for pre-marked ExportedProgram path
+                        elif entry.externalize_markers is not None:
+                            self._run_externalize_pipeline_from_markers(
+                                entry.externalize_markers, entry.exported_program
+                            )
                             self._perform_externalization(module.context)
 
                         self._get_graph_op(

@@ -449,6 +449,66 @@ def _prepare_externalized(
     return _PreparedModules(model, exported_program)
 
 
+class ExternalizeMarkers:
+    """Context manager that patches matching submodules' ``forward`` with
+    a ``torch.library.custom_op`` and restores them on exit.
+
+    Returned by :func:`mark_for_externalization`. Pass to
+    :meth:`TorchConverter.add_exported_program` via ``externalize_markers=``.
+    Any export run inside the ``with`` block captures the patched call sites
+    as opaque FX nodes that survive every downstream pass.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        targets: list[type | ExternalizeSpec],
+    ) -> None:
+        self._model = model
+        self._targets = targets
+        self._active = False
+
+    @property
+    def model(self) -> torch.nn.Module:
+        return self._model
+
+    def __enter__(self) -> ExternalizeMarkers:
+        if self._active:
+            raise RuntimeError("ExternalizeMarkers is already active")
+        _mark_externalize(self._model, self._targets)
+        self._active = True
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._active:
+            _restore_externalized(self._model)
+            self._active = False
+
+
+def mark_for_externalization(
+    model: torch.nn.Module,
+    targets: list[type | ExternalizeSpec],
+) -> ExternalizeMarkers:
+    """Patch matching submodules for externalization until the ``with`` exits.
+
+    Returns an :class:`ExternalizeMarkers` context manager. Inside the
+    ``with`` block each matching submodule's ``forward`` is a
+    ``torch.library.custom_op``; any export run there captures the call sites
+    as opaque FX nodes. Pair with
+    :meth:`TorchConverter.add_exported_program`'s ``externalize_markers=``::
+
+        with mark_for_externalization(model, [
+            ExternalizeSpec(RMSNorm, composite_op_name="rms_norm",
+                            composite_attrs=["eps"]),
+        ]) as markers:
+            ep = my_export_or_quantize_pipeline(model)
+            (TorchConverter()
+                .add_exported_program(ep, externalize_markers=markers)
+                .to_coreai())
+    """
+    return ExternalizeMarkers(model, targets)
+
+
 def _restore_externalized(module: torch.nn.Module) -> None:
     """Step 6: Undo all patches from step 1.
 

@@ -27,12 +27,14 @@ import numpy as np
 import torch
 from torch.testing import assert_close
 
-from coreai_torch import ExternalizeSpec, TorchConverter, get_decomp_table
+from coreai_torch import ExternalizeSpec, get_decomp_table
 from coreai_torch.composite_ops import GatedDeltaUpdate
 
 from ..utils import (
     _mlx_array_to_numpy_array,
     _torch_tensor_to_numpy_array,
+    convert_via_markers,
+    convert_via_module,
     filecheck_pattern,
     validate_numerical_output,
 )
@@ -155,13 +157,14 @@ class TestGatedDeltaUpdate:
             atol=tolerance,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("precision", [torch.float32, torch.float16])
     @pytest.mark.parametrize("dynamic", [False, True])
     def test_gated_delta_update_torch_export_ir(
-        self,
-        precision: torch.dtype,
-        dynamic: bool,
+        self, precision: torch.dtype, dynamic: bool, convert
     ) -> None:
         """Test that gated_delta_update produces correct composite op IR."""
         batch_size = 1
@@ -216,26 +219,21 @@ class TestGatedDeltaUpdate:
                 "beta": {2: seq_len_dim},
                 "initial_state": None,
             }
-
         # Verify externalization produces a composite op declaration in the IR
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    (query, key, value, g, beta, initial_state),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    ExternalizeSpec(
-                        target_class=GatedDeltaUpdate,
-                        composite_op_name="gated_delta_update",
-                        composite_attrs=["use_qk_l2_norm"],
-                    )
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                (query, key, value, g, beta, initial_state),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[
+                ExternalizeSpec(
+                    target_class=GatedDeltaUpdate,
+                    composite_op_name="gated_delta_update",
+                    composite_attrs=["use_qk_l2_norm"],
+                )
+            ],
         )
 
         s = "?" if dynamic else seq_len
@@ -248,6 +246,9 @@ class TestGatedDeltaUpdate:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.control_flow
     @pytest.mark.flaky(reruns=3)
     @pytest.mark.parametrize("precision", [torch.float32, torch.float16])
@@ -264,6 +265,7 @@ class TestGatedDeltaUpdate:
         head_k_dim: int,
         head_v_dim: int,
         use_qk_l2_norm: bool,
+        convert,
     ) -> None:
         """Test that gated_delta_update can be exported and externalized as a composite op."""
         batch_size = 1
@@ -347,26 +349,21 @@ class TestGatedDeltaUpdate:
         export_tol = {torch.float32: 1e-3, torch.float16: 5e-2}[precision]
         assert_close(output_exported, output_original, atol=export_tol, rtol=export_tol)
         assert_close(state_exported, state_original, atol=export_tol, rtol=export_tol)
-
         # Verify externalization produces a composite op declaration in the IR
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    (query, key, value, g, beta, initial_state),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    ExternalizeSpec(
-                        target_class=GatedDeltaUpdate,
-                        composite_op_name="gated_delta_update",
-                        composite_attrs=["use_qk_l2_norm"],
-                    )
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                (query, key, value, g, beta, initial_state),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[
+                ExternalizeSpec(
+                    target_class=GatedDeltaUpdate,
+                    composite_op_name="gated_delta_update",
+                    composite_attrs=["use_qk_l2_norm"],
+                )
+            ],
         )
 
         # Core AI runtime validation

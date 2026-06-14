@@ -21,13 +21,15 @@ if platform.system() == "Darwin":
     import mlx.core  # type: ignore[import-not-found, unused-ignore]
     import mlx.core.fast  # type: ignore[import-not-found, unused-ignore]
 
-from coreai_torch import ExternalizeSpec, TorchConverter, get_decomp_table
+from coreai_torch import ExternalizeSpec, get_decomp_table
 from coreai_torch.composite_ops import SDPA
 from coreai_torch.composite_ops._sdpa import _maybe_construct_attn_mask
 
 from ..utils import (
     _mlx_array_to_numpy_array,
     _torch_tensor_to_numpy_array,
+    convert_via_markers,
+    convert_via_module,
     filecheck_pattern,
     validate_numerical_output,
 )
@@ -519,6 +521,9 @@ class TestTorchSDPAConversion:
             composite_attrs=["scale", "is_causal", "window_size"],
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("scale", [None, 1.5])
     @pytest.mark.parametrize("is_causal", [False, True])
@@ -532,6 +537,7 @@ class TestTorchSDPAConversion:
         window_size: int,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Validate the Multi-Head Attention (MHA) use case of sdpa composite op IR."""
         batch_size = 3
@@ -568,17 +574,12 @@ class TestTorchSDPAConversion:
                 "key": {0: batch_dim, 2: seq_dim},
                 "value": {0: batch_dim, 2: seq_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -601,6 +602,9 @@ class TestTorchSDPAConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("scale", [None, 1.5])
     @pytest.mark.parametrize("is_causal", [False, True])
     @pytest.mark.parametrize("window_size", [0, 1, 2, 11])
@@ -613,6 +617,7 @@ class TestTorchSDPAConversion:
         window_size: int,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Validate the Multi-Head Attention (MHA) use case of sdpa composite op."""
         batch_size = 3
@@ -649,17 +654,12 @@ class TestTorchSDPAConversion:
                 "key": {0: batch_dim, 2: seq_dim},
                 "value": {0: batch_dim, 2: seq_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(query, key, value)
@@ -677,11 +677,14 @@ class TestTorchSDPAConversion:
             value=value,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    def test_mha_with_mask_ir(dynamic: bool, dtype: torch.dtype) -> None:
+    def test_mha_with_mask_ir(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Validate that attn_mask shows up in the arguments if specified (IR)."""
         batch_size = 3
         num_heads = 4
@@ -725,19 +728,14 @@ class TestTorchSDPAConversion:
                 "value": {0: batch_dim, 2: seq_dim},
                 "attn_mask": {0: q_dim, 1: seq_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(query, key, value, attn_mask),
-                    dynamic_shapes=export_dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(query, key, value, attn_mask),
+                dynamic_shapes=export_dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -760,10 +758,13 @@ class TestTorchSDPAConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    async def test_mha_with_mask(dynamic: bool, dtype: torch.dtype) -> None:
+    async def test_mha_with_mask(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Validate that attn_mask shows up in the arguments if specified."""
         batch_size = 3
         num_heads = 4
@@ -807,19 +808,14 @@ class TestTorchSDPAConversion:
                 "value": {0: batch_dim, 2: seq_dim},
                 "attn_mask": {0: q_dim, 1: seq_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(query, key, value, attn_mask),
-                    dynamic_shapes=export_dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(query, key, value, attn_mask),
+                dynamic_shapes=export_dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(query, key, value, attn_mask)
@@ -838,6 +834,9 @@ class TestTorchSDPAConversion:
             attn_mask=attn_mask,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("scale", [None, 1.5])
     @pytest.mark.parametrize("is_causal", [False, True])
@@ -851,6 +850,7 @@ class TestTorchSDPAConversion:
         window_size: int,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Validate the Grouped Query Attention (GQA) use case of sdpa composite op IR."""
         batch_size = 3
@@ -888,17 +888,12 @@ class TestTorchSDPAConversion:
                 "key": {0: batch_dim, 2: seq_dim},
                 "value": {0: batch_dim, 2: seq_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -921,6 +916,9 @@ class TestTorchSDPAConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("scale", [None, 1.5])
     @pytest.mark.parametrize("is_causal", [False, True])
     @pytest.mark.parametrize("window_size", [0, 1, 2, 11])
@@ -933,6 +931,7 @@ class TestTorchSDPAConversion:
         window_size: int,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Validate the Grouped Query Attention (GQA) use case of sdpa composite op."""
         batch_size = 3
@@ -970,17 +969,12 @@ class TestTorchSDPAConversion:
                 "key": {0: batch_dim, 2: seq_dim},
                 "value": {0: batch_dim, 2: seq_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(query, key, value), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(query, key, value)
@@ -998,6 +992,9 @@ class TestTorchSDPAConversion:
             value=value,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("scale", [None, 1.5])
     @pytest.mark.parametrize("is_causal", [False, True])
@@ -1011,6 +1008,7 @@ class TestTorchSDPAConversion:
         window_size: int,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Validate that sinks shows up in the arguments if specified (IR)."""
         batch_size = 3
@@ -1054,19 +1052,14 @@ class TestTorchSDPAConversion:
                 "value": {0: batch_dim, 2: seq_dim},
                 "sinks": {},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(query, key, value, sinks),
-                    dynamic_shapes=export_dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(query, key, value, sinks),
+                dynamic_shapes=export_dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else batch_size
@@ -1090,6 +1083,9 @@ class TestTorchSDPAConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("scale", [None, 1.5])
     @pytest.mark.parametrize("is_causal", [False, True])
     @pytest.mark.parametrize("window_size", [0, 1, 2, 11])
@@ -1102,6 +1098,7 @@ class TestTorchSDPAConversion:
         window_size: int,
         dynamic: bool,
         dtype: torch.dtype,
+        convert,
     ) -> None:
         """Validate that sinks shows up in the arguments if specified."""
         batch_size = 3
@@ -1145,19 +1142,14 @@ class TestTorchSDPAConversion:
                 "value": {0: batch_dim, 2: seq_dim},
                 "sinks": {},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(query, key, value, sinks),
-                    dynamic_shapes=export_dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(query, key, value, sinks),
+                dynamic_shapes=export_dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchSDPAConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(query, key, value, sinks)

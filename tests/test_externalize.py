@@ -27,6 +27,8 @@ from coreai_torch.externalize import (
 
 from .utils import (
     compare_outputs,
+    convert_via_markers,
+    convert_via_module,
     filecheck_pattern,
 )
 
@@ -59,8 +61,11 @@ async def _validate_numerics(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_static_shapes_ir() -> None:
+def test_externalize_static_shapes_ir(convert) -> None:
     """IR check: add_pytorch_module with static shapes produces noinline graph + invoke."""
 
     class InnerModule(nn.Module):
@@ -87,15 +92,13 @@ def test_externalize_static_shapes_ir() -> None:
     torch.manual_seed(42)
     model = OuterModel().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[InnerModule],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -111,7 +114,10 @@ def test_externalize_static_shapes_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_static_shapes() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_static_shapes(convert) -> None:
     """add_pytorch_module with static shapes produces noinline graph + invoke."""
 
     class InnerModule(nn.Module):
@@ -138,21 +144,22 @@ async def test_externalize_static_shapes() -> None:
     torch.manual_seed(42)
     model = OuterModel().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[InnerModule],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_dynamic_shapes_ir() -> None:
+def test_externalize_dynamic_shapes_ir(convert) -> None:
     """IR check: add_pytorch_module with dynamic batch dim produces ? in tensor types."""
 
     class InnerModule(nn.Module):
@@ -180,15 +187,13 @@ def test_externalize_dynamic_shapes_ir() -> None:
     model = OuterModel().eval()
     sample = (torch.randn(2, 4),)
     batch = Dim("batch", min=1, max=10)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(
             m, args=sample, dynamic_shapes={"x": {0: batch}}
         ).run_decompositions(get_decomp_table()),
         externalize_modules=[InnerModule],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -204,7 +209,10 @@ def test_externalize_dynamic_shapes_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_dynamic_shapes() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_dynamic_shapes(convert) -> None:
     """add_pytorch_module with dynamic batch dim produces ? in tensor types."""
 
     class InnerModule(nn.Module):
@@ -232,22 +240,23 @@ async def test_externalize_dynamic_shapes() -> None:
     model = OuterModel().eval()
     sample = (torch.randn(2, 4),)
     batch = Dim("batch", min=1, max=10)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(
             m, args=sample, dynamic_shapes={"x": {0: batch}}
         ).run_decompositions(get_decomp_table()),
         externalize_modules=[InnerModule],
     )
-    coreai_program = converter.to_coreai()
 
     for batch_size in [1, 2, 5, 10]:
         await _validate_numerics(coreai_program, model, (torch.randn(batch_size, 4),))
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_multiple_submodules_ir() -> None:
+def test_externalize_multiple_submodules_ir(convert) -> None:
     """IR check: Externalize two submodule classes; both get noinline graphs with invoke."""
 
     class InnerA(nn.Module):
@@ -278,15 +287,13 @@ def test_externalize_multiple_submodules_ir() -> None:
     torch.manual_seed(42)
     model = TwoInnerModel().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[InnerA, InnerB],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -306,7 +313,10 @@ def test_externalize_multiple_submodules_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_multiple_submodules() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_multiple_submodules(convert) -> None:
     """Externalize two submodule classes; both get noinline graphs with invoke."""
 
     class InnerA(nn.Module):
@@ -337,15 +347,13 @@ async def test_externalize_multiple_submodules() -> None:
     torch.manual_seed(42)
     model = TwoInnerModel().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[InnerA, InnerB],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
@@ -426,8 +434,11 @@ def test_wrap_module_invalid_submodule() -> None:
         _prepare_module(model, nn.Linear(4, 4))
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_deep_model_with_rmsnorm_ir() -> None:
+def test_externalize_deep_model_with_rmsnorm_ir(convert) -> None:
     """IR check: Externalize RMSNorm (depth-2 child) from a deeper model hierarchy."""
 
     class RMSNorm(nn.Module):
@@ -481,15 +492,13 @@ def test_externalize_deep_model_with_rmsnorm_ir() -> None:
     torch.manual_seed(42)
     model = MiniTransformer().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[RMSNorm],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -509,7 +518,10 @@ def test_externalize_deep_model_with_rmsnorm_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_deep_model_with_rmsnorm() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_deep_model_with_rmsnorm(convert) -> None:
     """Externalize RMSNorm (depth-2 child) from a deeper model hierarchy."""
 
     class RMSNorm(nn.Module):
@@ -563,21 +575,22 @@ async def test_externalize_deep_model_with_rmsnorm() -> None:
     torch.manual_seed(42)
     model = MiniTransformer().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[RMSNorm],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_composite_op_config_ir() -> None:
+def test_externalize_composite_op_config_ir(convert) -> None:
     """IR check: ExternalizeSpec with composite_op_name + composite_attrs produces composite_decl in IR."""
 
     class RMSNorm(nn.Module):
@@ -639,8 +652,7 @@ def test_externalize_composite_op_config_ir() -> None:
     torch.manual_seed(42)
     model = MiniTransformer().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -653,7 +665,6 @@ def test_externalize_composite_op_config_ir() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -675,7 +686,10 @@ def test_externalize_composite_op_config_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_composite_op_config() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_composite_op_config(convert) -> None:
     """ExternalizeSpec with composite_op_name + composite_attrs produces composite_decl in IR."""
 
     class RMSNorm(nn.Module):
@@ -737,8 +751,7 @@ async def test_externalize_composite_op_config() -> None:
     torch.manual_seed(42)
     model = MiniTransformer().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -751,13 +764,15 @@ async def test_externalize_composite_op_config() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_nested_ir() -> None:
+def test_externalize_nested_ir(convert) -> None:
     """IR check: Externalize with multiple types handles nested externalization (parent invokes child)."""
 
     class RMSNorm(nn.Module):
@@ -809,15 +824,13 @@ def test_externalize_nested_ir() -> None:
     torch.manual_seed(42)
     model = MiniTransformer().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[RMSNorm, TransformerBlock],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -837,7 +850,10 @@ def test_externalize_nested_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_nested() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_nested(convert) -> None:
     """Externalize with multiple types handles nested externalization (parent invokes child)."""
 
     class RMSNorm(nn.Module):
@@ -889,21 +905,22 @@ async def test_externalize_nested() -> None:
     torch.manual_seed(42)
     model = MiniTransformer().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[RMSNorm, TransformerBlock],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_composite_op_different_attrs_per_instance_ir() -> None:
+def test_externalize_composite_op_different_attrs_per_instance_ir(convert) -> None:
     """IR check: composite_attrs reads per-instance values, so two instances with different eps/axes get distinct composite_decls."""
 
     class RMSNorm(nn.Module):
@@ -941,8 +958,7 @@ def test_externalize_composite_op_different_attrs_per_instance_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -955,7 +971,6 @@ def test_externalize_composite_op_different_attrs_per_instance_ir() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -977,7 +992,10 @@ def test_externalize_composite_op_different_attrs_per_instance_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_composite_op_different_attrs_per_instance() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_composite_op_different_attrs_per_instance(convert) -> None:
     """composite_attrs reads per-instance values, so two instances with different eps/axes get distinct composite_decls."""
 
     class RMSNorm(nn.Module):
@@ -1015,8 +1033,7 @@ async def test_externalize_composite_op_different_attrs_per_instance() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1029,13 +1046,15 @@ async def test_externalize_composite_op_different_attrs_per_instance() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_sdpa_composite_op_ir() -> None:
+def test_externalize_sdpa_composite_op_ir(convert) -> None:
     """IR check: SDPA composite op names are auto-derived from the graph signature."""
 
     from coreai_torch.composite_ops._sdpa import SDPA
@@ -1058,8 +1077,7 @@ def test_externalize_sdpa_composite_op_ir() -> None:
     torch.manual_seed(42)
     model = SDPAModel().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1072,7 +1090,6 @@ def test_externalize_sdpa_composite_op_ir() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     # Without attn_mask, input_names should be ["query", "key", "value"]
     check_file = """
@@ -1090,7 +1107,10 @@ def test_externalize_sdpa_composite_op_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_sdpa_composite_op() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_sdpa_composite_op(convert) -> None:
     """SDPA composite op names are auto-derived from the graph signature."""
 
     from coreai_torch.composite_ops._sdpa import SDPA
@@ -1113,8 +1133,7 @@ async def test_externalize_sdpa_composite_op() -> None:
     torch.manual_seed(42)
     model = SDPAModel().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1127,13 +1146,15 @@ async def test_externalize_sdpa_composite_op() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_sdpa_dynamic_input_names_ir() -> None:
+def test_externalize_sdpa_dynamic_input_names_ir(convert) -> None:
     """IR check: Two SDPA instances in one model — one with attn_mask, one without — produce different input_names."""
 
     from coreai_torch.composite_ops._sdpa import SDPA
@@ -1164,8 +1185,7 @@ def test_externalize_sdpa_dynamic_input_names_ir() -> None:
         torch.randn(2, seq_len, DIM),
         torch.ones(seq_len, seq_len, dtype=torch.bool).tril(),
     )
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1178,7 +1198,6 @@ def test_externalize_sdpa_dynamic_input_names_ir() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     # sdpa_no_mask gets input_names = ["query", "key", "value"]
     # sdpa_with_mask gets input_names = ["query", "key", "value", "attn_mask"]
@@ -1204,7 +1223,10 @@ def test_externalize_sdpa_dynamic_input_names_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_sdpa_dynamic_input_names() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_sdpa_dynamic_input_names(convert) -> None:
     """Two SDPA instances in one model — one with attn_mask, one without — produce different input_names."""
 
     from coreai_torch.composite_ops._sdpa import SDPA
@@ -1235,8 +1257,7 @@ async def test_externalize_sdpa_dynamic_input_names() -> None:
         torch.randn(2, seq_len, DIM),
         torch.ones(seq_len, seq_len, dtype=torch.bool).tril(),
     )
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1249,15 +1270,17 @@ async def test_externalize_sdpa_dynamic_input_names() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(
         coreai_program, model, sample, input_names=("x", "attn_mask")
     )
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_single_sdpa_multi_call_site_ir() -> None:
+def test_externalize_single_sdpa_multi_call_site_ir(convert) -> None:
     """IR check: Single SDPA instance called twice — once without mask, once with — produces two separate graphs."""
 
     from coreai_torch.composite_ops._sdpa import SDPA
@@ -1285,8 +1308,7 @@ def test_externalize_single_sdpa_multi_call_site_ir() -> None:
         torch.randn(2, seq_len, DIM),
         torch.ones(seq_len, seq_len, dtype=torch.bool).tril(),
     )
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1299,7 +1321,6 @@ def test_externalize_single_sdpa_multi_call_site_ir() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     # Both graphs get a UUID suffix: sdpa_<uuid> (3-arg) and sdpa_<uuid> (4-arg)
     check_file = """
@@ -1324,7 +1345,10 @@ def test_externalize_single_sdpa_multi_call_site_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_single_sdpa_multi_call_site() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_single_sdpa_multi_call_site(convert) -> None:
     """Single SDPA instance called twice — once without mask, once with — produces two separate graphs."""
 
     from coreai_torch.composite_ops._sdpa import SDPA
@@ -1352,8 +1376,7 @@ async def test_externalize_single_sdpa_multi_call_site() -> None:
         torch.randn(2, seq_len, DIM),
         torch.ones(seq_len, seq_len, dtype=torch.bool).tril(),
     )
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1366,15 +1389,17 @@ async def test_externalize_single_sdpa_multi_call_site() -> None:
             )
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(
         coreai_program, model, sample, input_names=("x", "attn_mask")
     )
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_mixed_bare_and_spec_ir() -> None:
+def test_externalize_mixed_bare_and_spec_ir(convert) -> None:
     """IR check: Accepts a mix of bare types and ExternalizeSpec in one call."""
 
     class InnerA(nn.Module):
@@ -1405,8 +1430,7 @@ def test_externalize_mixed_bare_and_spec_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1420,7 +1444,6 @@ def test_externalize_mixed_bare_and_spec_ir() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -1441,8 +1464,11 @@ def test_externalize_mixed_bare_and_spec_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.asyncio
-async def test_externalize_mixed_bare_and_spec() -> None:
+async def test_externalize_mixed_bare_and_spec(convert) -> None:
     """Accepts a mix of bare types and ExternalizeSpec in one call.
 
     InnerA is passed as a bare type (simple externalization).
@@ -1477,8 +1503,7 @@ async def test_externalize_mixed_bare_and_spec() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -1492,7 +1517,6 @@ async def test_externalize_mixed_bare_and_spec() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
@@ -1895,8 +1919,11 @@ def test_model_restored_on_error() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_shared_instance_same_signature_ir() -> None:
+def test_externalize_shared_instance_same_signature_ir(convert) -> None:
     """IR check: Single submodule instance called twice with the same signature in one forward."""
 
     class Norm(nn.Module):
@@ -1927,15 +1954,13 @@ def test_externalize_shared_instance_same_signature_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Norm],
     )
-    coreai_program = converter.to_coreai()
 
     # Two separate noinline graphs (one per call site), each with a unique UUID
     check_file = """
@@ -1956,7 +1981,10 @@ def test_externalize_shared_instance_same_signature_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_shared_instance_same_signature() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_shared_instance_same_signature(convert) -> None:
     """Single submodule instance called twice with the same signature in one forward.
 
     Each call site gets its own noinline graph (distinct UUID) so the runtime
@@ -1991,20 +2019,21 @@ async def test_externalize_shared_instance_same_signature() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Norm],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
-async def test_externalize_no_matching_submodules_warns() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_no_matching_submodules_warns(convert) -> None:
     """externalize_modules lists a class that the model does not contain.
 
     This should emit a UserWarning naming the unmatched class and still
@@ -2037,21 +2066,22 @@ async def test_externalize_no_matching_submodules_warns() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
     with pytest.warns(UserWarning, match="Unrelated"):
-        converter = TorchConverter().add_pytorch_module(
+        coreai_program = convert(
             model,
             export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
                 get_decomp_table()
             ),
             externalize_modules=[Unrelated],
         )
-        coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
-async def test_externalize_partial_match_warns() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_partial_match_warns(convert) -> None:
     """Superset spec list: one class matches, another does not.
 
     The matched spec is still externalized; the unmatched spec produces a
@@ -2082,22 +2112,23 @@ async def test_externalize_partial_match_warns() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
     with pytest.warns(UserWarning, match="Missing"):
-        converter = TorchConverter().add_pytorch_module(
+        coreai_program = convert(
             model,
             export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
                 get_decomp_table()
             ),
             externalize_modules=[Matched, Missing],
         )
-        coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_three_level_nesting_ir() -> None:
+def test_externalize_three_level_nesting_ir(convert) -> None:
     """IR check: Externalize at three levels of depth: grandchild, child, and each gets its own graph."""
 
     class Norm(nn.Module):
@@ -2145,15 +2176,13 @@ def test_externalize_three_level_nesting_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Norm, FeedForward],
     )
-    coreai_program = converter.to_coreai()
 
     # Norm is deepest (noinline first), then FeedForward (invokes Norm), then main (invokes FF)
     check_file = """
@@ -2174,7 +2203,10 @@ def test_externalize_three_level_nesting_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_three_level_nesting() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_three_level_nesting(convert) -> None:
     """Externalize at three levels of depth: grandchild, child, and each gets its own graph.
 
     L3 (Norm) sits inside L2 (FeedForward) inside L1 (Block) inside root.
@@ -2227,21 +2259,22 @@ async def test_externalize_three_level_nesting() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 8, DIM),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Norm, FeedForward],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_identity_passthrough_ir() -> None:
+def test_externalize_identity_passthrough_ir(convert) -> None:
     """IR check: Externalize a submodule that is an identity (returns input unchanged)."""
 
     class Identity(nn.Module):
@@ -2260,15 +2293,13 @@ def test_externalize_identity_passthrough_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Identity],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -2284,7 +2315,10 @@ def test_externalize_identity_passthrough_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_identity_passthrough() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_identity_passthrough(convert) -> None:
     """Externalize a submodule that is an identity (returns input unchanged).
 
     The noinline graph should still be emitted and numerics should match.
@@ -2306,21 +2340,22 @@ async def test_externalize_identity_passthrough() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Identity],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_composite_op_empty_attrs_ir() -> None:
+def test_externalize_composite_op_empty_attrs_ir(convert) -> None:
     """IR check: ExternalizeSpec with composite_op_name but empty composite_attrs list."""
 
     class Scale(nn.Module):
@@ -2343,8 +2378,7 @@ def test_externalize_composite_op_empty_attrs_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -2357,7 +2391,6 @@ def test_externalize_composite_op_empty_attrs_ir() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -2374,7 +2407,10 @@ def test_externalize_composite_op_empty_attrs_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_composite_op_empty_attrs() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_composite_op_empty_attrs(convert) -> None:
     """ExternalizeSpec with composite_op_name but empty composite_attrs list.
 
     Should produce a composite_decl with the op name but no attribute payload.
@@ -2400,8 +2436,7 @@ async def test_externalize_composite_op_empty_attrs() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -2414,13 +2449,15 @@ async def test_externalize_composite_op_empty_attrs() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_multiple_inputs_ir() -> None:
+def test_externalize_multiple_inputs_ir(convert) -> None:
     """IR check: Externalize a module whose forward takes multiple tensor inputs."""
 
     class Bilinear(nn.Module):
@@ -2443,15 +2480,13 @@ def test_externalize_multiple_inputs_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4), torch.randn(2, 4))
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Bilinear],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -2467,7 +2502,10 @@ def test_externalize_multiple_inputs_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_multiple_inputs() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_multiple_inputs(convert) -> None:
     """Externalize a module whose forward takes multiple tensor inputs."""
 
     class Bilinear(nn.Module):
@@ -2490,21 +2528,22 @@ async def test_externalize_multiple_inputs() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4), torch.randn(2, 4))
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Bilinear],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample, input_names=("x", "y"))
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_dynamic_shapes_multiple_inputs_ir() -> None:
+def test_externalize_dynamic_shapes_multiple_inputs_ir(convert) -> None:
     """IR check: Dynamic batch dim with multiple model inputs, both sharing the same dynamic dim."""
 
     class Inner(nn.Module):
@@ -2528,15 +2567,13 @@ def test_externalize_dynamic_shapes_multiple_inputs_ir() -> None:
     sample = (torch.randn(2, 4), torch.randn(2, 4))
 
     batch = Dim("batch", min=1, max=10)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(
             m, args=sample, dynamic_shapes={"x": {0: batch}, "y": {0: batch}}
         ).run_decompositions(get_decomp_table()),
         externalize_modules=[Inner],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -2552,7 +2589,10 @@ def test_externalize_dynamic_shapes_multiple_inputs_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_dynamic_shapes_multiple_inputs() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_dynamic_shapes_multiple_inputs(convert) -> None:
     """Dynamic batch dim with multiple model inputs, both sharing the same dynamic dim."""
 
     class Inner(nn.Module):
@@ -2576,15 +2616,13 @@ async def test_externalize_dynamic_shapes_multiple_inputs() -> None:
     sample = (torch.randn(2, 4), torch.randn(2, 4))
 
     batch = Dim("batch", min=1, max=10)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(
             m, args=sample, dynamic_shapes={"x": {0: batch}, "y": {0: batch}}
         ).run_decompositions(get_decomp_table()),
         externalize_modules=[Inner],
     )
-    coreai_program = converter.to_coreai()
 
     for batch_size in [1, 3, 7, 10]:
         await _validate_numerics(
@@ -2595,8 +2633,11 @@ async def test_externalize_dynamic_shapes_multiple_inputs() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_all_submodules_ir() -> None:
+def test_externalize_all_submodules_ir(convert) -> None:
     """IR check: Externalize every submodule class so main graph is only invokes."""
 
     class LayerA(nn.Module):
@@ -2627,15 +2668,13 @@ def test_externalize_all_submodules_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[LayerA, LayerB],
     )
-    coreai_program = converter.to_coreai()
 
     # Main graph body should only contain invokes — no aten ops
     check_file = """
@@ -2656,7 +2695,10 @@ def test_externalize_all_submodules_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_all_submodules() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_all_submodules(convert) -> None:
     """Externalize every submodule class so main graph is only invokes."""
 
     class LayerA(nn.Module):
@@ -2687,21 +2729,22 @@ async def test_externalize_all_submodules() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[LayerA, LayerB],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_many_instances_of_same_class_ir() -> None:
+def test_externalize_many_instances_of_same_class_ir(convert) -> None:
     """IR check: Four instances of the same class — all get separate noinline graphs."""
 
     class Block(nn.Module):
@@ -2726,15 +2769,13 @@ def test_externalize_many_instances_of_same_class_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Block],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -2754,7 +2795,10 @@ def test_externalize_many_instances_of_same_class_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_many_instances_of_same_class() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_many_instances_of_same_class(convert) -> None:
     """Four instances of the same class — all get separate noinline graphs."""
 
     class Block(nn.Module):
@@ -2779,21 +2823,22 @@ async def test_externalize_many_instances_of_same_class() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[Block],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
-def test_externalize_subclass_matches_parent_spec_ir() -> None:
+def test_externalize_subclass_matches_parent_spec_ir(convert) -> None:
     """IR check: ExternalizeSpec with a base class matches subclass instances via isinstance."""
 
     class BaseNorm(nn.Module):
@@ -2826,16 +2871,14 @@ def test_externalize_subclass_matches_parent_spec_ir() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
     # Target BaseNorm — should match CustomNorm via isinstance
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[BaseNorm],
     )
-    coreai_program = converter.to_coreai()
 
     check_file = """
         // CHECK-LABEL: module {
@@ -2851,7 +2894,10 @@ def test_externalize_subclass_matches_parent_spec_ir() -> None:
     filecheck_pattern(str(coreai_program), check_file=check_file)
 
 
-async def test_externalize_subclass_matches_parent_spec() -> None:
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
+async def test_externalize_subclass_matches_parent_spec(convert) -> None:
     """ExternalizeSpec with a base class matches subclass instances via isinstance."""
 
     class BaseNorm(nn.Module):
@@ -2884,16 +2930,14 @@ async def test_externalize_subclass_matches_parent_spec() -> None:
     torch.manual_seed(42)
     model = Model().eval()
     sample = (torch.randn(2, 4),)
-
     # Target BaseNorm — should match CustomNorm via isinstance
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[BaseNorm],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
@@ -3030,6 +3074,9 @@ def test_derive_composite_io_names_middle_optional_skipped() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skip(
@@ -3038,7 +3085,7 @@ def test_derive_composite_io_names_middle_optional_skipped() -> None:
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-def test_externalize_rms_norm_with_quantized_linears_ir() -> None:
+def test_externalize_rms_norm_with_quantized_linears_ir(convert) -> None:
     """IR check: Quantized (int4) weights retain si4 dtype when externalization re-exports the model."""
 
     class Model(nn.Module):
@@ -3076,14 +3123,13 @@ def test_externalize_rms_norm_with_quantized_linears_ir() -> None:
         composite_op_name="rms_norm",
         composite_attrs=["axes", "eps"],
     )
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[externalize_spec],
     )
-    coreai_program = converter.to_coreai()
 
     # Verify si4 quantized weights survived the re-export
     ir = str(coreai_program)
@@ -3110,6 +3156,9 @@ def test_externalize_rms_norm_with_quantized_linears_ir() -> None:
     filecheck_pattern(ir, check_file=pattern)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skip(
     reason=(
@@ -3117,7 +3166,7 @@ def test_externalize_rms_norm_with_quantized_linears_ir() -> None:
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-async def test_externalize_rms_norm_with_quantized_linears() -> None:
+async def test_externalize_rms_norm_with_quantized_linears(convert) -> None:
     """Quantized (int4) weights retain si4 dtype when externalization re-exports the model.
 
     Regression test: the externalize pipeline re-exports the model, which used to
@@ -3166,18 +3215,20 @@ async def test_externalize_rms_norm_with_quantized_linears() -> None:
         composite_op_name="rms_norm",
         composite_attrs=["axes", "eps"],
     )
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[externalize_spec],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skip(
@@ -3186,7 +3237,7 @@ async def test_externalize_rms_norm_with_quantized_linears() -> None:
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-def test_externalize_gather_mm_with_quantized_rhs_ir() -> None:
+def test_externalize_gather_mm_with_quantized_rhs_ir(convert) -> None:
     """IR check: Quantized expert weight flows as rhs into an externalized GatherMM composite."""
     num_experts = 4
     in_dim = 24
@@ -3234,14 +3285,13 @@ def test_externalize_gather_mm_with_quantized_rhs_ir() -> None:
         composite_op_name="gather_mm",
         composite_attrs=["num_batch_axes"],
     )
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[externalize_spec],
     )
-    coreai_program = converter.to_coreai()
 
     ir = str(coreai_program)
     assert "si4" in ir, (
@@ -3268,6 +3318,9 @@ def test_externalize_gather_mm_with_quantized_rhs_ir() -> None:
     filecheck_pattern(ir, check_file=pattern)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skip(
     reason=(
@@ -3275,7 +3328,7 @@ def test_externalize_gather_mm_with_quantized_rhs_ir() -> None:
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-async def test_externalize_gather_mm_with_quantized_rhs() -> None:
+async def test_externalize_gather_mm_with_quantized_rhs(convert) -> None:
     """Quantized expert weight flows as rhs into an externalized GatherMM composite.
 
     In MoE models (SwitchLinear), expert weights get quantized to int4.
@@ -3337,20 +3390,22 @@ async def test_externalize_gather_mm_with_quantized_rhs() -> None:
         composite_op_name="gather_mm",
         composite_attrs=["num_batch_axes"],
     )
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
         ),
         externalize_modules=[externalize_spec],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(
         coreai_program, model, sample, input_names=("x", "indices")
     )
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skip(
@@ -3359,7 +3414,7 @@ async def test_externalize_gather_mm_with_quantized_rhs() -> None:
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-def test_externalize_multiple_composites_with_quantized_weights_ir() -> None:
+def test_externalize_multiple_composites_with_quantized_weights_ir(convert) -> None:
     """IR check: Multiple composite ops (RMSNorm + SDPA) externalized with quantized linears."""
     head_dim = 16
     n_heads = 2
@@ -3403,8 +3458,7 @@ def test_externalize_multiple_composites_with_quantized_weights_ir() -> None:
     transform_with_custom_compression_ops(model)  # noqa: F821
 
     sample = (torch.randn(1, 4, embed_dim),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -3422,7 +3476,6 @@ def test_externalize_multiple_composites_with_quantized_weights_ir() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     ir = str(coreai_program)
     assert "si4" in ir, "Expected si4 quantized weight constants."
@@ -3442,6 +3495,9 @@ def test_externalize_multiple_composites_with_quantized_weights_ir() -> None:
     filecheck_pattern(ir, check_file=pattern)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skip(
     reason=(
@@ -3449,7 +3505,7 @@ def test_externalize_multiple_composites_with_quantized_weights_ir() -> None:
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-async def test_externalize_multiple_composites_with_quantized_weights() -> None:
+async def test_externalize_multiple_composites_with_quantized_weights(convert) -> None:
     """Multiple composite ops (RMSNorm + SDPA) externalized with quantized linears.
 
     Real LLM export externalizes several composite ops simultaneously.
@@ -3499,8 +3555,7 @@ async def test_externalize_multiple_composites_with_quantized_weights() -> None:
     transform_with_custom_compression_ops(model)  # noqa: F821
 
     sample = (torch.randn(1, 4, embed_dim),)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -3518,11 +3573,13 @@ async def test_externalize_multiple_composites_with_quantized_weights() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(coreai_program, model, sample)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.ir
 @pytest.mark.skip(
     reason=(
@@ -3530,7 +3587,7 @@ async def test_externalize_multiple_composites_with_quantized_weights() -> None:
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-def test_externalize_gather_mm_combined_with_rms_norm_ir() -> None:
+def test_externalize_gather_mm_combined_with_rms_norm_ir(convert) -> None:
     """IR check: GatherMM + RMSNorm both externalized alongside quantized weights."""
     num_experts = 4
     in_dim = 24
@@ -3572,8 +3629,7 @@ def test_externalize_gather_mm_combined_with_rms_norm_ir() -> None:
     x = torch.randn(2, in_dim)
     indices = torch.tensor([[0, 2], [1, 3]], dtype=torch.int16)
     sample = (x, indices)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -3591,7 +3647,6 @@ def test_externalize_gather_mm_combined_with_rms_norm_ir() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     ir = str(coreai_program)
     assert "si4" in ir, "Expected si4 quantized weight constants."
@@ -3605,13 +3660,16 @@ def test_externalize_gather_mm_combined_with_rms_norm_ir() -> None:
     filecheck_pattern(ir, check_file=pattern)
 
 
+@pytest.mark.parametrize(
+    "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+)
 @pytest.mark.skip(
     reason=(
         "transform_with_custom_compression_ops has been deprecated. Consider removing "
         "these tests or use an alternative way to generate quantized weights"
     )
 )
-async def test_externalize_gather_mm_combined_with_rms_norm() -> None:
+async def test_externalize_gather_mm_combined_with_rms_norm(convert) -> None:
     """GatherMM + RMSNorm both externalized alongside quantized weights.
 
     Mirrors real MoE transformer blocks (Mixtral, Qwen3-MoE) where
@@ -3659,8 +3717,7 @@ async def test_externalize_gather_mm_combined_with_rms_norm() -> None:
     x = torch.randn(2, in_dim)
     indices = torch.tensor([[0, 2], [1, 3]], dtype=torch.int16)
     sample = (x, indices)
-
-    converter = TorchConverter().add_pytorch_module(
+    coreai_program = convert(
         model,
         export_fn=lambda m: torch.export.export(m, args=sample).run_decompositions(
             get_decomp_table()
@@ -3678,7 +3735,6 @@ async def test_externalize_gather_mm_combined_with_rms_norm() -> None:
             ),
         ],
     )
-    coreai_program = converter.to_coreai()
 
     await _validate_numerics(
         coreai_program, model, sample, input_names=("x", "indices")

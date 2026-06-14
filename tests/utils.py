@@ -26,6 +26,7 @@ from torch import Tensor
 
 from coreai_torch import TorchConverter
 from coreai_torch._utils import print_graph
+from coreai_torch.externalize import mark_for_externalization
 
 from .conftest import dump_optests_enabled, get_current_test_id
 
@@ -51,6 +52,32 @@ def set_test_compute_unit_kind(name: str) -> None:
     """
     global _COMPUTE_UNIT_KIND
     _COMPUTE_UNIT_KIND = name
+
+
+def convert_via_module(
+    model, *, export_fn, externalize_modules, _converter=None, **kwargs
+):
+    """Convert ``model`` via ``TorchConverter.add_pytorch_module``."""
+    converter = _converter if _converter is not None else TorchConverter()
+    return converter.add_pytorch_module(
+        model,
+        export_fn=export_fn,
+        externalize_modules=externalize_modules,
+        **kwargs,
+    ).to_coreai()
+
+
+def convert_via_markers(
+    model, *, export_fn, externalize_modules, _converter=None, **kwargs
+):
+    """Convert ``model`` via ``mark_for_externalization`` +
+    ``TorchConverter.add_exported_program(externalize_markers=...)``."""
+    converter = _converter if _converter is not None else TorchConverter()
+    with mark_for_externalization(model, externalize_modules) as markers:
+        ep = export_fn(model)
+        return converter.add_exported_program(
+            ep, externalize_markers=markers, **kwargs
+        ).to_coreai()
 
 
 def _get_test_specialization_options() -> "SpecializationOptions | None":
