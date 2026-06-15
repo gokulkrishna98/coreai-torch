@@ -5,6 +5,7 @@
 
 """Test inspector implementations."""
 
+import sys
 import tempfile
 from pathlib import Path
 
@@ -105,6 +106,10 @@ async def test_caching_inspector() -> None:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Requires loading a runtime asset (AIModel.load); only supported on macOS",
+)
 @pytest.mark.asyncio
 async def test_coreai_inspector(simple_coreai_program: AIProgram) -> None:
     """Test _CoreAIInspector with a deployed model."""
