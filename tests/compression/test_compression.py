@@ -13,8 +13,6 @@ import numpy as np
 import pytest
 import torch
 from coreai.authoring import AIProgram
-from coreai.runtime import AIModel, NDArray
-
 from torch import nn
 from torch.export.exported_program import ExportedProgram
 
@@ -25,10 +23,11 @@ from coreai_torch._compression.custom_layers import (
     ActivationQuantizeModule,
 )
 
-from ..utils import TemporaryModelAsset, filecheck_pattern
+from ..utils import filecheck_pattern, validate_numerical_output
 
 # We add "./tests/coreai" path, in order to use some existing utils
 sys.path.append(str(Path(__file__).parents[2]))
+
 
 def _scale_shape(
     input_shape: tuple[int, ...],
@@ -57,30 +56,6 @@ async def lower_to_coreai(
     converter = TorchConverter().add_exported_program(coreaten_program)
     return converter.to_coreai()
 
-async def _validate_execution(
-    coreai_program: AIProgram,
-    torch_out: torch.Tensor,
-    atol: float = 1e-4,
-    rtol: float = 1e-4,
-    **kwargs: Any,
-) -> None:
-    """Run the Core AI program using ref kernels and match with torch output."""
-    with TemporaryModelAsset() as tempdir:
-        coreai_program.save_asset(Path(tempdir))
-        ai_model = await AIModel.load(Path(tempdir))
-        rt_func = ai_model.load_function("main")
-
-        # Wrap all kwargs with NDArray
-        nd_kwargs = {k: NDArray(data=v) for k, v in kwargs.items()}
-        coreai_outs = await rt_func(nd_kwargs)
-
-        coreai_out_np = {k: v.numpy() for k, v in coreai_outs.items()}
-        np.testing.assert_allclose(
-            torch_out.detach().numpy(),
-            next(iter(coreai_out_np.values())),  # type: ignore[arg-type]
-            rtol=rtol,
-            atol=atol,
-        )
 
 @pytest.mark.parametrize(
     "nbits",
@@ -162,9 +137,11 @@ async def test_weight_dequantization_int_with_custom_op(
         exported_program,
     )
 
-    await _validate_execution(
-        coreai_program,
-        torch_output,
+    await validate_numerical_output(
+        coreai_program=coreai_program,
+        torch_out=torch_output,
+        atol=1e-4,
+        rtol=1e-4,
         input_tensor=input_tensor,
     )
 
@@ -231,9 +208,11 @@ async def test_weight_dequantization_fp_with_custom_op(
         exported_program,
     )
 
-    await _validate_execution(
-        coreai_program,
-        torch_output,
+    await validate_numerical_output(
+        coreai_program=coreai_program,
+        torch_out=torch_output,
+        atol=1e-4,
+        rtol=1e-4,
         input_tensor=input_tensor,
     )
 
@@ -282,9 +261,11 @@ async def test_weight_dequantization_fp4_with_custom_op() -> None:
         exported_program,
     )
 
-    await _validate_execution(
-        coreai_program,
-        torch_output,
+    await validate_numerical_output(
+        coreai_program=coreai_program,
+        torch_out=torch_output,
+        atol=1e-4,
+        rtol=1e-4,
         input_tensor=input_tensor,
     )
 
@@ -370,9 +351,11 @@ async def test_activation_quantization_int_with_custom_op(
         exported_program,
     )
 
-    await _validate_execution(
-        coreai_program,
-        torch_output,
+    await validate_numerical_output(
+        coreai_program=coreai_program,
+        torch_out=torch_output,
+        atol=1e-4,
+        rtol=1e-4,
         input_tensor=input_tensor,
     )
 
@@ -440,9 +423,11 @@ async def test_activation_quantization_fp_with_custom_op(
         exported_program,
     )
 
-    await _validate_execution(
-        coreai_program,
-        torch_output,
+    await validate_numerical_output(
+        coreai_program=coreai_program,
+        torch_out=torch_output,
+        atol=1e-4,
+        rtol=1e-4,
         input_tensor=input_tensor,
     )
 
@@ -539,9 +524,11 @@ async def test_activation_dequantization_int_with_custom_op(
         exported_program,
     )
 
-    await _validate_execution(
-        coreai_program,
-        torch_output,
+    await validate_numerical_output(
+        coreai_program=coreai_program,
+        torch_out=torch_output,
+        atol=1e-4,
+        rtol=1e-4,
         input_tensor=input_tensor,
     )
 
@@ -617,9 +604,11 @@ async def test_activation_dequantization_fp_with_custom_op(
         exported_program,
     )
 
-    await _validate_execution(
-        coreai_program,
-        torch_output,
+    await validate_numerical_output(
+        coreai_program=coreai_program,
+        torch_out=torch_output,
+        atol=1e-4,
+        rtol=1e-4,
         input_tensor=input_tensor,
     )
 
@@ -806,9 +795,11 @@ class TestWeightPalettizationWithCustomOp:
 
         coreai_program = await lower_to_coreai(exported_program)
 
-        await _validate_execution(
-            coreai_program,
-            torch_output,
+        await validate_numerical_output(
+            coreai_program=coreai_program,
+            torch_out=torch_output,
+            atol=1e-4,
+            rtol=1e-4,
             input_tensor=input_tensor,
         )
 
@@ -952,9 +943,11 @@ class TestWeightSparsificationWithCustomOp:
             exported_program,
         )
 
-        await _validate_execution(
-            coreai_program,
-            torch_output,
+        await validate_numerical_output(
+            coreai_program=coreai_program,
+            torch_out=torch_output,
+            atol=1e-4,
+            rtol=1e-4,
             input_tensor=input_tensor,
         )
 
@@ -1056,9 +1049,7 @@ class TestActivationQuantizationLinear:
             "" if granularity == "per_tensor" else f"{activation_shape[axis]}x"
         )
 
-        msg = (
-            "TODO: reshape on consts such as offset and scale is not const eliminated"
-        )
+        msg = "TODO: reshape on consts such as offset and scale is not const eliminated"
         pytest.xfail(reason=msg)
         truth = f"""
         // CHECK-LABEL: coreai.graph @main
@@ -1119,4 +1110,10 @@ class TestActivationQuantizationLinear:
             exported_program,
         )
 
-        await _validate_execution(coreai_program, torch_out, input_tensor=input_tensor)
+        await validate_numerical_output(
+            coreai_program=coreai_program,
+            torch_out=torch_out,
+            atol=1e-4,
+            rtol=1e-4,
+            input_tensor=input_tensor,
+        )

@@ -994,25 +994,34 @@ class TestArangeIR:
             x=x,
             dynamic_shapes={"x": {0: torch.export.Dim("batch", min=1)}},
         )
+        # ``end`` is a SymInt (rank-1 si32) sliced from x.shape[0];
+        # ``start``/``step`` are scalar (rank-0) si32 constants. The
+        # lowering casts each operand to the FX node's output dtype (f32)
+        # before ``coreai.range_`` so the op sees uniform-typed scalars;
+        # the optimizer then constant-folds the casts on start/step into
+        # f32 constants directly.
         filecheck_pattern(
             ir,
             check_file="""
-                // CHECK-LABEL: module {
-                // CHECK-NEXT:   coreai.graph @main(%[[ARG0:.*]]: tensor<?x3xf32> {coreai.name = "x"}) -> (tensor<?xf32> {coreai.name = "{{.*}}"}) attributes {__coreai_pure__} {
-                // CHECK-NEXT:     %[[V0:.*]] = coreai.constant dense<> : tensor<0xui32>
-                // CHECK-NEXT:     %[[V1:.*]] = coreai.constant dense<1> : tensor<si32>
-                // CHECK-NEXT:     %[[V2:.*]] = coreai.constant dense<0> : tensor<si32>
-                // CHECK-NEXT:     %[[V3:.*]] = coreai.constant dense<1> : tensor<1xsi32>
-                // CHECK-NEXT:     %[[V4:.*]] = coreai.constant dense<0> : tensor<1xsi32>
-                // CHECK-NEXT:     %[[V5:.*]] = coreai.get_shape %[[ARG0]] : tensor<?x3xf32> -> tensor<2xui32>
-                // CHECK-NEXT:     %[[V6:.*]] = coreai.slice %[[V5]], %[[V4]], %[[V3]], %[[V3]] : (tensor<2xui32>, tensor<1xsi32>, tensor<1xsi32>, tensor<1xsi32>) -> tensor<1xui32>
-                // CHECK-NEXT:     %[[V7:.*]] = coreai.cast %[[V6]] : tensor<1xui32> to tensor<1xsi32>
-                // CHECK-NEXT:     %[[V8:.*]] = coreai.reshape %[[V7]], %[[V0]] : (tensor<1xsi32>, tensor<0xui32>) -> tensor<si32>
-                // CHECK-NEXT:     %[[V9:.*]] = coreai.range %[[V2]], %[[V8]], %[[V1]] : (tensor<si32>, tensor<si32>, tensor<si32>) -> tensor<?xsi32>
-                // CHECK-NEXT:     %[[V10:.*]] = coreai.cast %[[V9]] : tensor<?xsi32> to tensor<?xf32>
-                // CHECK-NEXT:     coreai.output %[[V10]] : tensor<?xf32>
-                // CHECK-NEXT:   }
-                // CHECK-NEXT: }
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %[[ARG0:.*]]: tensor<?x3xf32>
+                // CHECK-SAME:    -> (tensor<?xf32>
+                //
+                // start and step land as f32 constants directly (the si32
+                // constant + cast-to-f32 pair gets folded by the optimizer):
+                // CHECK-DAG:     %[[STEP:.+]] = coreai.constant dense<1.000000e+00> : tensor<f32>
+                // CHECK-DAG:     %[[START:.+]] = coreai.constant dense<0.000000e+00> : tensor<f32>
+                //
+                // end: get_shape -> slice -> cast(ui32->si32) -> reshape(rank-1 to rank-0) -> cast(si32->f32):
+                // CHECK:         %[[END_RANK1:.+]] = coreai.cast {{.*}} : tensor<1xui32> to tensor<1xsi32>
+                // CHECK:         %[[END_RANK0:.+]] = coreai.reshape %[[END_RANK1]], {{.*}} : (tensor<1xsi32>, tensor<0xui32>) -> tensor<si32>
+                // CHECK:         %[[END_F32:.+]] = coreai.cast %[[END_RANK0]] : tensor<si32> to tensor<f32>
+                //
+                // range called with all-f32 scalars; result is f32 directly,
+                // no post-range cast on the result:
+                // CHECK:         %[[OUT:.+]] = coreai.range %[[START]], %[[END_F32]], %[[STEP]] : (tensor<f32>, tensor<f32>, tensor<f32>) -> tensor<?xf32>
+                // CHECK-NOT:     coreai.cast %[[OUT]]
+                // CHECK:         coreai.output %[[OUT]] : tensor<?xf32>
             """,
         )
 
