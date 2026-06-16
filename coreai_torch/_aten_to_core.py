@@ -644,17 +644,20 @@ def replace_arange_start_step(
         else coreai.constant(1, dtype=start.type.element_type)
     )
 
-    # Squeeze rank-1 inputs to 0D scalars for coreai.range_.
+    # coreai.range_ requires scalar (rank-0) operands that share an element
+    # type. aten.arange promotes mixed-type scalars internally; we replicate
+    # that here by squeezing each operand to rank-0 and casting to the FX
+    # node's output dtype before the op.
+    target_type = get_output_element_type_from_node(node)
+
     def to_scalar(v: Value) -> Value:
         if v.type.rank > 0:
-            return coreai.shrink_dims(v, list(range(v.type.rank)))
+            v = coreai.shrink_dims(v, list(range(v.type.rank)))
+        if v.type.element_type != target_type:
+            v = coreai.cast(v, target_type)
         return v
 
-    result = coreai.range_(to_scalar(start), to_scalar(end), to_scalar(step))
-    target_type = get_output_element_type_from_node(node)
-    if result.type.element_type != target_type:
-        result = coreai.cast(result, target_type)
-    return result
+    return coreai.range_(to_scalar(start), to_scalar(end), to_scalar(step))
 
 
 def replace_batch_norm(
@@ -814,6 +817,7 @@ def replace_binary_ops(
         "pow.Scalar": coreai.broadcasting_pow,
         "pow.Tensor_Tensor": coreai.broadcasting_pow,
         "pow.Tensor_Scalar": coreai.broadcasting_pow,
+        "pow": coreai.broadcasting_pow,
         "sub.Tensor": coreai.broadcasting_sub,
         "sub.Scalar": coreai.broadcasting_sub,
         "sub": coreai.broadcasting_sub,
@@ -944,6 +948,55 @@ def replace_cat(values_map: dict[str, Value], node: fx.Node, loc: Location) -> V
 
     rank = inputs[0].type.rank
     dim = dim + rank if dim < 0 else dim
+
+    # coreai.concat requires all non-concat dims to be provably equal across
+    # inputs. Under dynamic shapes, one branch can carry a dynamic non-concat
+    # axis while a sibling has a static size for the same axis — the dynamic
+    # side must in fact equal that static size, but the type system doesn't
+    # know it. Reshape such inputs to the known static size before the concat.
+    # Multiple distinct static sizes on one axis is a real mismatch and is
+    # left for the dialect verifier to reject.
+    dyn = ShapedType.get_dynamic_size()
+
+    def known_static(axis: int) -> int | None:
+        if axis == dim:
+            return None
+        sizes = {inp.type.shape[axis] for inp in inputs if inp.type.shape[axis] != dyn}
+        return next(iter(sizes)) if len(sizes) == 1 else None
+
+    statics = [known_static(a) for a in range(rank)]
+    promoted: list[Value] = []
+    for inp in inputs:
+        new_shape = [
+            statics[a]
+            if statics[a] is not None and inp.type.shape[a] == dyn
+            else inp.type.shape[a]
+            for a in range(rank)
+        ]
+        if new_shape != list(inp.type.shape):
+            if all(s != dyn for s in new_shape):
+                # All axes static post-promotion: list-form reshape packs
+                # the shape into an int32 constant tensor.
+                inp = coreai.reshape(inp, new_shape)
+            else:
+                # Mixed static / dynamic post-promotion: build the shape
+                # vector at runtime by mixing the input's actual sizes
+                # (via coreai.get_shape) for the still-dynamic axes with
+                # constants for the promoted axes.
+                runtime_shape = coreai.cast(coreai.get_shape(inp), dtype=np.int32)
+                parts = [
+                    coreai.constant([s], dtype=np.int32)
+                    if s != dyn
+                    else coreai.slice_(runtime_shape, [a], [a + 1], [1])
+                    for a, s in enumerate(new_shape)
+                ]
+                result_type = RankedTensorType.get(new_shape, inp.type.element_type)
+                inp = coreai.ReshapeOp(
+                    inp, coreai.concat(0, parts), results=[result_type]
+                ).result
+        promoted.append(inp)
+    inputs = promoted
+
     return coreai.concat(dim, inputs)
 
 
@@ -2192,11 +2245,29 @@ def replace_remainder(
 
 def replace_repeat(values_map: dict[str, Value], node: fx.Node, loc: Location) -> Value:
     x = _get_operand(values_map, node, 0)
-    repeats = np.array(node.args[1], dtype=np.uint32)
-    extra_dims = len(repeats) - x.type.rank
+    repeat_args = list(node.args[1])
+    extra_dims = len(repeat_args) - x.type.rank
     if extra_dims > 0:
         x = coreai.expand_dims(x, list(range(extra_dims)))
-    return coreai.tile(x, repeats)
+
+    if all(isinstance(r, int) for r in repeat_args):
+        return coreai.tile(x, np.array(repeat_args, dtype=np.uint32))
+
+    # At least one repeat is a SymInt fx.Node — build a rank-1 uint32 dim
+    # vector at runtime, with per-axis constants for plain ints and the
+    # resolved Value (cast to uint32, lifted to rank-1 if scalar) for
+    # SymInts. coreai.tile accepts a runtime Value for its dims.
+    chunks: list[Value] = []
+    for r in repeat_args:
+        if isinstance(r, int):
+            chunks.append(coreai.constant([r], dtype=np.uint32))
+        else:
+            assert isinstance(r, fx.Node)
+            v = coreai.cast(values_map[r.name], dtype=np.uint32)
+            if v.type.rank == 0:
+                v = coreai.reshape(v, [1])
+            chunks.append(v)
+    return coreai.tile(x, coreai.concat(0, chunks))
 
 
 def replace_round_decimals(
@@ -2595,6 +2666,7 @@ def replace_unary_ops(
         "log.default": coreai.log,
         "relu.default": coreai.relu,
         "round.default": coreai.round_,
+        "round": coreai.round_,
         "rsqrt.default": coreai.rsqrt,
         "sigmoid.default": coreai.sigmoid,
         "silu.default": coreai.silu,
@@ -3434,6 +3506,7 @@ _aten_to_core_resolver: dict[str, Callable[..., Any]] = {
     "pow.Scalar": replace_binary_ops,
     "pow.Tensor_Scalar": replace_binary_ops,
     "pow.Tensor_Tensor": replace_binary_ops,
+    "pow": replace_binary_ops,
     "prod.default": replace_prod_default,
     "prod.dim_int": replace_prod_dim_int,
     "reciprocal.default": replace_reciprocal,
@@ -3441,6 +3514,7 @@ _aten_to_core_resolver: dict[str, Callable[..., Any]] = {
     "remainder.Tensor": replace_remainder,
     "round.default": replace_unary_ops,
     "round.decimals": replace_round_decimals,
+    "round": replace_unary_ops,
     "repeat.default": replace_repeat,
     "rsqrt.default": replace_unary_ops,
     "scaled_dot_product_attention.default": replace_sdpa,

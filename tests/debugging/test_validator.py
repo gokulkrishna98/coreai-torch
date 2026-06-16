@@ -5,6 +5,7 @@
 
 """Tests for validator with hierarchical graphs."""
 
+import sys
 from typing import Any
 
 import numpy as np
@@ -406,6 +407,10 @@ async def _create_coreai_program_from_model(
     return coreai_program
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Requires loading a runtime asset (AIModel.load); only supported on macOS",
+)
 @pytest.mark.parametrize(
     "nan_branch",
     [

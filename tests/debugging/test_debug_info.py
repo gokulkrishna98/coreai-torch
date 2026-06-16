@@ -5,6 +5,7 @@
 
 """Tests for debug_infos from CompiledLibrary and AIModel."""
 
+import sys
 import tempfile
 from pathlib import Path
 
@@ -67,6 +68,10 @@ def _verify_debug_info_record(record: DebugInfoRecord) -> None:
         ]
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Requires loading a runtime asset (AIModel.load); only supported on macOS",
+)
 @pytest.mark.asyncio
 async def test_compiled_library_debug_infos(
     simple_coreai_program: AIProgram,
@@ -91,6 +96,10 @@ async def test_compiled_library_debug_infos(
         _verify_debug_info_record(debug_info_records[0])
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Requires loading a runtime asset (AIModel.load); only supported on macOS",
+)
 @pytest.mark.asyncio
 async def test_aimodel_debug_infos(
     simple_coreai_program: AIProgram,
