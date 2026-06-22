@@ -1522,6 +1522,46 @@ def replace_argmax(values_map: dict[str, Value], node: fx.Node, loc: Location) -
     return result if keepdim else coreai.shrink_dims(result, [dim])
 
 
+def replace_atan2(values_map: dict[str, Value], node: fx.Node, loc: Location) -> Value:
+    """atan2(y, x) via atan(y/x) with quadrant correction.
+
+    atan2 is undefined for (y=0, x=0); follows the convention atan2(0, 0) = 0.
+    """
+    y, x = _get_operands(values_map, node, [0, 1])
+    ele_type = x.type.element_type
+
+    zero = coreai.constant(0.0, dtype=ele_type)
+    pi = coreai.constant(np.pi, dtype=ele_type)
+    half_pi = coreai.constant(np.pi / 2.0, dtype=ele_type)
+    neg_half_pi = coreai.constant(-np.pi / 2.0, dtype=ele_type)
+
+    # Avoid division by zero when x = 0 by substituting x = 1 for the ratio.
+    x_is_zero = coreai.broadcasting_equal(x, zero)
+    x_safe = coreai.broadcasting_where(
+        x_is_zero, coreai.constant(1.0, dtype=ele_type), x
+    )
+    base = coreai.atan(coreai.broadcasting_divide(y, x_safe))
+
+    # Quadrant correction: x < 0 shifts the result by ±π.
+    x_neg = coreai.broadcasting_greater(zero, x)
+    y_neg = coreai.broadcasting_greater(zero, y)
+    y_pos = coreai.broadcasting_greater(y, zero)
+    correction = coreai.broadcasting_where(
+        y_neg,
+        coreai.broadcasting_sub(base, pi),
+        coreai.broadcasting_add(base, pi),
+    )
+    nonzero_result = coreai.broadcasting_where(x_neg, correction, base)
+
+    # x = 0: result is π/2, −π/2, or 0 based on sign of y.
+    zero_result = coreai.broadcasting_where(
+        y_pos,
+        half_pi,
+        coreai.broadcasting_where(y_neg, neg_half_pi, zero),
+    )
+    return coreai.broadcasting_where(x_is_zero, zero_result, nonzero_result)
+
+
 def replace_gather(values_map: dict[str, Value], node: fx.Node, loc: Location) -> Value:
     """Converts aten.gather to coreai.gather_along_axis."""
     x, index = _get_operands(values_map, node, [0, 2])
@@ -3440,6 +3480,7 @@ _aten_to_core_resolver: dict[str, Callable[..., Any]] = {
     "asin.default": replace_unary_ops,
     "asinh.default": replace_unary_ops,
     "atan.default": replace_unary_ops,
+    "atan2.default": replace_atan2,
     "atanh.default": replace_unary_ops,
     "_adaptive_avg_pool2d.default": replace_adaptive_avg_pool2d,
     "_unsafe_view.default": replace_view,
