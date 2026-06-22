@@ -654,6 +654,13 @@ class TestAtan2:
 
 
 @pytest.mark.parametrize(
+    "x",
+    [
+        torch.rand(2, 3, 8, 8),
+        torch.rand(2, 3, 8, 8, dtype=torch.float16),  # fp16
+    ],
+)
+@pytest.mark.parametrize(
     "dynamic_dims", [tuple(), (0,), (2,), (3,), (0, 2), (0, 3), (0, 2, 3)]
 )
 async def test_batchnorm(x: Tensor, dynamic_dims: tuple[int]) -> None:
