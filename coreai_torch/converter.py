@@ -343,7 +343,7 @@ class TorchConverter:
         :class:`_ExportedModule` list from ``markers`` and stores it for
         :meth:`_perform_externalization`.
         """
-        if not markers._exported_modules:
+        if markers._exported_modules is None:
             raise RuntimeError(
                 "export_submodules() must be called on the ExternalizeMarkers "
                 "before passing them to add_exported_program."

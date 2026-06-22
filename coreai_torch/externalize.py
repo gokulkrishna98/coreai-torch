@@ -459,10 +459,9 @@ class ExternalizeMarkers:
     def __init__(
         self,
         model: torch.nn.Module,
-        exported_modules: list[_ExportedModule],
     ) -> None:
         self._model = model
-        self._exported_modules = exported_modules
+        self._exported_modules: list[_ExportedModule] | None = None
         self._restored = False
 
     @property
@@ -509,7 +508,7 @@ def mark_for_externalization(
     ``markers.restore()`` to undo the patches.
     """
     _mark_externalize(model, targets)
-    return ExternalizeMarkers(model, exported_modules=[])
+    return ExternalizeMarkers(model)
 
 
 def export_submodules(
