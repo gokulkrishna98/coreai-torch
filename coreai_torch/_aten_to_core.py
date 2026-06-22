@@ -1523,9 +1523,15 @@ def replace_argmax(values_map: dict[str, Value], node: fx.Node, loc: Location) -
 
 
 def replace_atan2(values_map: dict[str, Value], node: fx.Node, loc: Location) -> Value:
-    """atan2(y, x) via atan(y/x) with quadrant correction.
+    """Lower atan2(y, x) using atan(y/x) with quadrant correction.
 
-    atan2 is undefined for (y=0, x=0); follows the convention atan2(0, 0) = 0.
+    CoreAI has no native atan2, so it is decomposed as:
+      - x != 0: atan(y/x) adjusted by ±π to place the result in the correct quadrant.
+      - x == 0: ±π/2 or 0 based on sign of y.
+
+    When x=0, x is replaced with 1 before the divide solely to avoid NaN/inf; that
+    intermediate result is discarded by the final where-select in favour of the x=0 branch.
+    atan2(0, 0) = 0 by convention.
     """
     y, x = _get_operands(values_map, node, [0, 1])
     ele_type = x.type.element_type
