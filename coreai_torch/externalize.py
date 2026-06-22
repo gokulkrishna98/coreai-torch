@@ -8,21 +8,19 @@
 Implementation Details
 ======================
 
-The externalize pipeline runs in ``to_coreai()`` when ``externalize_modules``
-is provided. It works in five phases:
+The externalize pipeline works in four phases:
 
-Phase 1: Mark & Re-export (``_mark_externalize``)
---------------------------------------------------
-1. Walk ``model.named_modules()`` and for each matching instance: resolve the
-   module path, sanitize the op name, save the original forward as
-   ``_original_forward``, register a ``torch.library.custom_op`` from the
-   submodule's ``forward``, register the original forward as the fake
-   implementation via ``register_fake``, patch ``submodule.forward`` to call
-   the custom op, and stamp ``_externalize_config = ExternalizeSpec(...)``
-   on the module.
-2. Re-export via ``export_fn(model)`` and ``run_decompositions(decomp_table)``.
-   The FX graph now contains opaque ``call_function`` nodes for each custom op
-   call site.
+Phase 1: Mark (``mark_for_externalization`` / ``_mark_externalize``)
+--------------------------------------------------------------------
+Called immediately when the user calls ``mark_for_externalization(model, targets)``.
+Walks ``model.named_modules()`` and for each matching instance: resolves the
+module path, sanitizes the op name, saves the original forward as
+``_original_forward``, registers a ``torch.library.custom_op`` from the
+submodule's ``forward``, registers the original forward as the fake
+implementation via ``register_fake``, patches ``submodule.forward`` to call
+the custom op, and stamps ``_externalize_config = ExternalizeSpec(...)`` on
+the module.  The model is left patched until ``ExternalizeMarkers.restore()``
+is called (either explicitly or via ``export_submodules``).
 
 Phase 2: Prepare (``_prepare_externalized`` / ``_prepare_module_export``)
 -------------------------------------------------------------------------
@@ -40,18 +38,15 @@ from the ``ExportedProgram``'s graph signature (parameters/buffers use their
 target attribute name, user inputs use their forward parameter name). The
 exported program is then decomposed via ``run_decompositions()``.
 
+Phases 2 and 3 are run eagerly inside ``ExternalizeMarkers.export_submodules()``,
+which also restores the model in a ``finally`` block.
+
 Phase 4: Emit Core AI IR (``_perform_externalization``)
 ------------------------------------------------------
 Process ``_ExportedModule`` objects deepest-first so inner lowerings exist
 when parent graphs are built. For each module, build a ``coreai.GraphOp``
 (``noinline`` for all, ``private`` + ``composite_decl`` for composite ops)
 and register per-node lowerings keyed by FX node name.
-
-Phase 5: Cleanup (``_restore_externalized``)
----------------------------------------------
-Remove all markers (``_original_forward``, ``_externalize_name``,
-``_externalize_op_name``, ``_externalize_config``) from every patched module.
-The user's model is left unmodified.
 """
 
 from __future__ import annotations
@@ -450,63 +445,99 @@ def _prepare_externalized(
 
 
 class ExternalizeMarkers:
-    """Context manager that patches matching submodules' ``forward`` with
-    a ``torch.library.custom_op`` and restores them on exit.
+    """Handle returned by :func:`mark_for_externalization`.
 
-    Returned by :func:`mark_for_externalization`. Pass to
+    Patches are applied immediately on construction. Call
+    :func:`export_submodules` once the patched model has been exported (or
+    quantized) to run sub-export and restore the model. Pass the markers to
     :meth:`TorchConverter.add_exported_program` via ``externalize_markers=``.
-    Any export run inside the ``with`` block captures the patched call sites
-    as opaque FX nodes that survive every downstream pass.
+
+    If you need to abandon the workflow before calling :func:`export_submodules`,
+    call :meth:`restore` explicitly to undo the patches.
     """
 
     def __init__(
         self,
         model: torch.nn.Module,
-        targets: list[type | ExternalizeSpec],
+        exported_modules: list[_ExportedModule],
     ) -> None:
         self._model = model
-        self._targets = targets
-        self._active = False
+        self._exported_modules = exported_modules
+        self._restored = False
 
     @property
     def model(self) -> torch.nn.Module:
         return self._model
 
-    def __enter__(self) -> ExternalizeMarkers:
-        if self._active:
-            raise RuntimeError("ExternalizeMarkers is already active")
-        _mark_externalize(self._model, self._targets)
-        self._active = True
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        if self._active:
+    def restore(self) -> None:
+        """Undo all forward patches. Safe to call more than once."""
+        if not self._restored:
             _restore_externalized(self._model)
-            self._active = False
+            self._restored = True
 
 
 def mark_for_externalization(
     model: torch.nn.Module,
     targets: list[type | ExternalizeSpec],
 ) -> ExternalizeMarkers:
-    """Patch matching submodules for externalization until the ``with`` exits.
+    """Patch matching submodules immediately and return an :class:`ExternalizeMarkers` handle.
 
-    Returns an :class:`ExternalizeMarkers` context manager. Inside the
-    ``with`` block each matching submodule's ``forward`` is a
-    ``torch.library.custom_op``; any export run there captures the call sites
-    as opaque FX nodes. Pair with
-    :meth:`TorchConverter.add_exported_program`'s ``externalize_markers=``::
+    Each matching submodule's ``forward`` is replaced with a
+    ``torch.library.custom_op`` so that any export or quantization pass run
+    afterwards captures the call sites as opaque FX nodes that survive every
+    downstream transform.
 
-        with mark_for_externalization(model, [
+    After exporting (or quantizing) the model, call
+    :func:`export_submodules` with the markers and the resulting
+    ``ExportedProgram``.  That function runs the sub-export phase and restores
+    the original ``forward`` methods::
+
+        markers = mark_for_externalization(model, [
             ExternalizeSpec(RMSNorm, composite_op_name="rms_norm",
                             composite_attrs=["eps"]),
-        ]) as markers:
-            ep = my_export_or_quantize_pipeline(model)
-            (TorchConverter()
-                .add_exported_program(ep, externalize_markers=markers)
-                .to_coreai())
+        ])
+        ep = my_export_or_quantize_pipeline(model)
+        export_submodules(markers, ep)
+
+        coreai_program = (
+            TorchConverter()
+            .add_exported_program(ep, externalize_markers=markers)
+            .to_coreai()
+        )
+
+    If you need to abort before calling ``export_submodules``, call
+    ``markers.restore()`` to undo the patches.
     """
-    return ExternalizeMarkers(model, targets)
+    _mark_externalize(model, targets)
+    return ExternalizeMarkers(model, exported_modules=[])
+
+
+def export_submodules(
+    markers: ExternalizeMarkers,
+    exported_program: ExportedProgram,
+) -> None:
+    """Run sub-export (Phases 2–3) and restore the model.
+
+    Finds every custom-op call site in ``exported_program``, runs
+    ``torch.export.export`` on each patched submodule, and stores the
+    resulting :class:`_ExportedModule` list on ``markers``.  The original
+    ``forward`` methods are restored in a ``finally`` block regardless of
+    whether the export succeeds.
+
+    Call this once after the patched model has been exported or quantized,
+    before passing ``markers`` to
+    :meth:`TorchConverter.add_exported_program`.
+    """
+    try:
+        preps = _PreparedModules(markers.model, exported_program)
+        exts: list[_ExportedModule] = []
+        for prep in preps:
+            inner_ep = _torch_export_module(prep)
+            inner_ep = inner_ep.run_decompositions()
+            exts.append(_finalize_module_export(prep, inner_ep))
+        markers._exported_modules = exts
+    finally:
+        markers.restore()
 
 
 def _restore_externalized(module: torch.nn.Module) -> None:

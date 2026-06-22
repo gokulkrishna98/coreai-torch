@@ -26,7 +26,7 @@ from torch import Tensor
 
 from coreai_torch import TorchConverter
 from coreai_torch._utils import print_graph
-from coreai_torch.externalize import mark_for_externalization
+from coreai_torch.externalize import export_submodules, mark_for_externalization
 
 from .conftest import dump_optests_enabled, get_current_test_id
 
@@ -73,11 +73,12 @@ def convert_via_markers(
     """Convert ``model`` via ``mark_for_externalization`` +
     ``TorchConverter.add_exported_program(externalize_markers=...)``."""
     converter = _converter if _converter is not None else TorchConverter()
-    with mark_for_externalization(model, externalize_modules) as markers:
-        ep = export_fn(model)
-        return converter.add_exported_program(
-            ep, externalize_markers=markers, **kwargs
-        ).to_coreai()
+    markers = mark_for_externalization(model, externalize_modules)
+    ep = export_fn(model)
+    export_submodules(markers, ep)
+    return converter.add_exported_program(
+        ep, externalize_markers=markers, **kwargs
+    ).to_coreai()
 
 
 def _get_test_specialization_options() -> "SpecializationOptions | None":

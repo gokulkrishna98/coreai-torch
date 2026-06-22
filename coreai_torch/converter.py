@@ -336,32 +336,19 @@ class TorchConverter:
     def _run_externalize_pipeline_from_markers(
         self, markers: ExternalizeMarkers, exported_program: ExportedProgram
     ) -> None:
-        """Externalize from a user-supplied, pre-marked ``ExportedProgram``.
+        """Externalize from a user-supplied, pre-exported :class:`ExternalizeMarkers`.
 
-        Used by :meth:`add_exported_program` when ``externalize_markers`` is
-        set. The user already ran Phases 1-2 (mark + export) inside the
-        markers' ``with`` block, so ``exported_program`` already contains
-        custom-op call sites and the model is still patched. We just sub-export
-        each marked submodule and stash results for
-        :meth:`_perform_externalization`. The user owns restoration.
+        Phases 1–3 have already been completed by ``mark_for_externalization``
+        and ``export_submodules``.  This method simply reads the pre-computed
+        :class:`_ExportedModule` list from ``markers`` and stores it for
+        :meth:`_perform_externalization`.
         """
-        model = markers.model
-        preps: Iterator[_PreparedModule] = _prepare_externalized(
-            model, exported_program
-        )
-        exts: list[_ExportedModule] = []
-        with self._progress_bar.stream("Externalizing submodules") as advance:
-            for prep in preps:
-                try:
-                    inner_ep = _torch_export_module(prep)
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to export externalized submodule '{prep.name}': {e}"
-                    ) from e
-                inner_ep = inner_ep.run_decompositions()
-                exts.append(_finalize_module_export(prep, inner_ep))
-                advance()
-        self._externalized_modules = exts
+        if not markers._exported_modules:
+            raise RuntimeError(
+                "export_submodules() must be called on the ExternalizeMarkers "
+                "before passing them to add_exported_program."
+            )
+        self._externalized_modules = markers._exported_modules
         self.exported_program = exported_program
 
     def _perform_externalization(self, context) -> None:
