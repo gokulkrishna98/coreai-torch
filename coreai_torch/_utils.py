@@ -175,6 +175,23 @@ class _ProgressBar:
         self.close()
 
 
+def to_rank1_int32(v: Value) -> Value:
+    """Coerce a SymInt-derived Value to canonical rank-1 si32 form.
+
+    Dim-vector concats (used to build shape operands for ``coreai.reshape``,
+    ``coreai.interpolate``, etc.) require all inputs to share rank and
+    element type. SymInt values can arrive rank-0 (e.g. from
+    ``aten._local_scalar_dense``) or with a different int variant. This
+    helper produces the form that aligns with ``coreai.constant([i],
+    dtype=np.int32)`` and ``replace_sym_size_int``.
+    """
+    if v.type.rank == 0:
+        v = coreai.reshape(v, [1])
+    if v.type.element_type != IntegerType.get_signed(32):
+        v = coreai.cast(v, np.int32)
+    return v
+
+
 def upsample_build_output_shape_dynamic(
     x: Value, out_h: int | Value, out_w: int | Value
 ) -> Value:
@@ -192,8 +209,8 @@ def upsample_build_output_shape_dynamic(
     )
     shape = coreai.cast(coreai.get_shape(x), dtype=np.int32)
     non_spatial = coreai.slice_(shape, [0], [2], [1])
-    h = [out_h] if isinstance(out_h, int) else out_h
-    w = [out_w] if isinstance(out_w, int) else out_w
+    h = [out_h] if isinstance(out_h, int) else to_rank1_int32(out_h)
+    w = [out_w] if isinstance(out_w, int) else to_rank1_int32(out_w)
     return coreai.concat(0, [non_spatial, h, w])
 
 
@@ -986,9 +1003,13 @@ def get_operand(
     if isinstance(arg, fx.Node):
         return values_map[arg.name]
     if isinstance(arg, list) and any(isinstance(e, fx.Node) for e in arg):
-        # Mixed list: resolve fx.Node elements via values_map, keep ints as constants.
+        # Mixed list: SymInt fx.Nodes + plain ints. Concat the two sources
+        # into a single rank-1 si32 dim vector. Both branches must produce
+        # the same canonical form so the concat verifier accepts them.
         dim_vals = [
-            values_map[e.name] if isinstance(e, fx.Node) else coreai.constant([e])
+            to_rank1_int32(values_map[e.name])
+            if isinstance(e, fx.Node)
+            else coreai.constant([e], dtype=np.int32)
             for e in arg
         ]
         return coreai.concat(0, dim_vals) if len(dim_vals) > 1 else dim_vals[0]
@@ -1575,15 +1596,15 @@ def _find_program_for(
     name: str,
     op_name: str,
     programs: dict[str, ExportedProgram],
-) -> ExportedProgram:
-    """Find the nearest ancestor program that contains *op_name*."""
+) -> ExportedProgram | None:
+    """Find the nearest ancestor program that contains *op_name*, or ``None``."""
     for ancestor in _ancestor_paths(name):
         if (
             ancestor in programs
             and _find_custom_op_node(programs[ancestor], op_name) is not None
         ):
             return programs[ancestor]
-    raise ValueError(f"Custom op for '{name}' not found in any ancestor program")
+    return None
 
 
 def _reverse_lookup(mapping: dict[str, str], value: str) -> str | None:

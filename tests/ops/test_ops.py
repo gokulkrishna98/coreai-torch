@@ -347,6 +347,22 @@ class TestArange:
         x = torch.zeros(2, 8)
         await validate_numerical_output(model=model, x=x)
 
+    async def test_symint_end_with_float_start_step(self) -> None:
+        """Regression for ``replace_arange_start_step``: when ``end`` is
+        SymInt-derived (carrying f32 element type from a sym_size cast)
+        and ``start`` / ``step`` come in as scalar si32, ``coreai.range_``
+        rejects the mismatched element types. The lowering must unify all
+        three to the FX-meta target type before the range op."""
+
+        class ArangeMixedModel(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                return torch.arange(0.0, x.shape[0], 0.5, dtype=torch.float32)
+
+        model = ArangeMixedModel().eval()
+        x = torch.zeros(6)
+        dynamic_shapes = {"x": {0: torch.export.Dim("n", min=2, max=16)}}
+        await validate_numerical_output(model=model, x=x, dynamic_shapes=dynamic_shapes)
+
 
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize(
@@ -984,6 +1000,55 @@ class TestCat:
             // CHECK-NOT: tensor<0x3xf32>
         """
         filecheck_pattern(str(coreai_program), check_file=check_file)
+
+    async def test_dynamic_vs_static_non_concat_axis(self) -> None:
+        """Regression for non-concat-axis promotion: when one cat input has a
+        dynamic non-concat axis while a sibling has a known static size for
+        that same axis, the verifier can't statically prove they match. The
+        lowering reshapes the dynamic side to the known static size before
+        the concat (needed by multi-resolution feature merges under dynamic
+        shapes)."""
+
+        class CatModel(nn.Module):
+            def forward(self, a: Tensor, b: Tensor) -> Tensor:
+                return torch.cat([a, b], dim=0)
+
+        a = torch.rand(2, 4)
+        b = torch.rand(3, 4)
+        # Mark only a's dim 1 dynamic; b's dim 1 stays static at 4. Dim.AUTO
+        # prevents torch.export from specializing it back to a constant.
+        await validate_numerical_output(
+            model=CatModel().eval(),
+            a=a,
+            b=b,
+            dynamic_shapes=({1: torch.export.Dim.AUTO}, {}),
+        )
+
+    async def test_partial_static_promotion_with_dynamic_axes(self) -> None:
+        """A cat input has one non-concat axis that is statically known
+        via a sibling AND another non-concat axis that is dynamic on every
+        input. After promoting the first axis to its static size, the
+        second axis remains dynamic, so the lowering must build the
+        reshape's shape vector at runtime."""
+
+        class CatModel(nn.Module):
+            def forward(self, a: Tensor, b: Tensor) -> Tensor:
+                return torch.cat([a, b], dim=2)
+
+        a = torch.rand(2, 4, 5, 6)
+        b = torch.rand(2, 4, 7, 6)
+        # Mark dim 1 of `a` dynamic (sibling `b` has static 4 there → must be
+        # promoted) and dim 0 of both inputs dynamic (no static sibling →
+        # remains dynamic post-promotion, forcing the runtime-shape path).
+        await validate_numerical_output(
+            model=CatModel().eval(),
+            a=a,
+            b=b,
+            dynamic_shapes=(
+                {0: torch.export.Dim.AUTO, 1: torch.export.Dim.AUTO},
+                {0: torch.export.Dim.AUTO},
+            ),
+        )
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
@@ -3067,6 +3132,61 @@ async def test_repeat(x: Tensor, repeats: tuple[int, ...], dynamic: bool) -> Non
     await validate_numerical_output(model=model, x=x, dynamic_shapes=dynamic_shapes)
 
 
+class TestRepeat:
+    @pytest.mark.ir
+    def test_symint_arg_lowers_ir(self) -> None:
+        """``aten.repeat`` with a SymInt entry in the repeats list (i.e. a
+        ``torch.fx.Node``, not a plain int) must lower to a dynamic
+        ``coreai.tile`` whose dim vector is built at runtime."""
+
+        class RepeatModel(nn.Module):
+            def forward(self, x: Tensor, y: Tensor) -> Tensor:
+                return x.repeat(y.shape[0], 1)
+
+        x = torch.rand(2, 3)
+        y = torch.rand(4, 8)
+        batch = torch.export.Dim("batch", min=1, max=16)
+        program = torch.export.export(
+            RepeatModel(), args=(x, y), dynamic_shapes=({}, {0: batch})
+        ).run_decompositions()
+
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %arg0: tensor<2x3xf32>
+                // CHECK-SAME:    %arg1: tensor<?x8xf32>
+                // CHECK:         %[[SHAPE:.+]] = coreai.get_shape %arg1 : tensor<?x8xf32> -> tensor<2xui32>
+                // CHECK:         %[[SLICE:.+]] = coreai.slice %[[SHAPE]]
+                // CHECK-SAME:      -> tensor<1xui32>
+                // CHECK:         %[[ONE:.+]] = coreai.constant dense<1> : tensor<1xui32>
+                // CHECK:         %[[DIMS:.+]] = coreai.concat {{.*}}, %{{.+}}, %[[ONE]]
+                // CHECK-SAME:      -> tensor<2xui32>
+                // CHECK:         %[[OUT:.+]] = coreai.tile %arg0, %[[DIMS]]
+                // CHECK:         coreai.output %[[OUT]]
+            """,
+        )
+
+    async def test_symint_arg_numerical(self) -> None:
+        """Numerical validation: ``aten.repeat`` with a SymInt entry in the
+        repeats list must produce the same result as ``torch.repeat``."""
+
+        class RepeatModel(nn.Module):
+            def forward(self, x: Tensor, y: Tensor) -> Tensor:
+                return x.repeat(y.shape[0], 1)
+
+        x = torch.rand(2, 3)
+        y = torch.rand(4, 8)
+        batch = torch.export.Dim("batch", min=1, max=16)
+        await validate_numerical_output(
+            model=RepeatModel().eval(),
+            x=x,
+            y=y,
+            dynamic_shapes=({}, {0: batch}),
+        )
+
+
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize(
     "x",
@@ -3219,6 +3339,142 @@ async def test_pow_constant(x: Tensor, dynamic: bool) -> None:
     model = PowModelConstant().eval()
     dynamic_shapes = {"x": _all_dims_dynamic(x)} if dynamic else None
     await validate_numerical_output(model=model, x=x, dynamic_shapes=dynamic_shapes)
+
+
+class TestRound:
+    """Regression suite for the bare ``aten.round`` OpOverloadPacket target.
+    Same shape of bug as the pow case: torch.export rewrites can leave
+    ``aten.round`` without a ``.default`` overload, which previously raised
+    ``Unsupported ATen op: round`` / ``KeyError: 'round'``."""
+
+    @staticmethod
+    def _rewrite_to_overload_packet(program: object) -> None:
+        for node in program.graph_module.graph.nodes:
+            if node.op != "call_function":
+                continue
+            if getattr(node.target, "_overloadpacket", None) is torch.ops.aten.round:
+                node.target = torch.ops.aten.round
+        program.graph_module.recompile()
+
+    def test_lowers_ir(self) -> None:
+        class RoundModel(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                return torch.round(x)
+
+        x = torch.tensor([[-1.5, 2.0], [3.0, -4.0]])
+        program = torch.export.export(RoundModel(), args=(x,)).run_decompositions()
+        self._rewrite_to_overload_packet(program)
+
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        coreai_program.optimize()
+        # The bare ``aten.round`` target must reach ``coreai.round`` —
+        # not produce a different op or fail with ``Unsupported ATen op``.
+        # Shape and element type must pass through unchanged.
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %[[ARG0:.*]]: tensor<2x2xf32>
+                // CHECK-SAME:    -> (tensor<2x2xf32>
+                // CHECK:         %[[OUT:.+]] = coreai.round %[[ARG0]] : tensor<2x2xf32> -> tensor<2x2xf32>
+                // CHECK:         coreai.output %[[OUT]] : tensor<2x2xf32>
+            """,
+        )
+
+    async def test_numerical(self) -> None:
+        class RoundModel(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                return torch.round(x)
+
+        x = torch.tensor([[-1.5, 2.0, 0.4], [3.6, -4.5, -0.5]])
+        program = torch.export.export(RoundModel(), args=(x,)).run_decompositions()
+        self._rewrite_to_overload_packet(program)
+
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        torch_out = RoundModel().eval()(x)
+        await validate_numerical_output(
+            coreai_program=coreai_program, torch_out=torch_out, x=x
+        )
+
+
+class TestView:
+    """Regression suite for ``get_operand``'s mixed-list path: a list arg
+    that mixes ``fx.Node`` SymInt entries with plain ints (e.g. a view
+    shape like ``[1, 1024, h, w]`` where h, w come from ``round(SymFloat)``)
+    must produce concat operands with a uniform rank-1 int32 element type
+    — otherwise the dialect rejects the dim-vector concat with ``expected
+    the same element type for all inputs to concat``."""
+
+    def test_view_with_round_symfloat_dims(self) -> None:
+        """View shape mixes plain ints with SymInts that come from
+        ``round(sym_float)`` shape arithmetic. Without the fix,
+        ``coreai.concat`` rejects the mixed-element-type operands when
+        building the dim vector for the reshape."""
+
+        class ViewModel(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                # round(SymFloat) → SymInt: produces a Value whose type
+                # doesn't match the int32 constants used for plain-int
+                # entries in the same dim list.
+                aspect = x.shape[3] / x.shape[2]
+                h = round((1800 / aspect) ** 0.5)
+                w = round((1800 * aspect) ** 0.5)
+                # ``view([1, C, round_h, round_w])`` — the mixed-list path
+                # in ``get_operand`` builds a dim-vector concat that
+                # combines plain-int constants with SymInt Values whose
+                # element type the fix normalises.
+                flat = x.view(1, 1024, -1)
+                return flat.view(1, 1024, h, w)
+
+        x = torch.rand(1, 1024, 42, 42, dtype=torch.float16)
+        dynamic_shapes = {
+            "x": {
+                2: torch.export.Dim("h", min=14),
+                3: torch.export.Dim("w", min=14),
+            }
+        }
+        program = torch.export.export(
+            ViewModel().eval(), args=(x,), dynamic_shapes=dynamic_shapes
+        ).run_decompositions()
+        # Convert to Core AI — must not raise. Pre-fix this raised
+        # ``ValueError: Operation creation failed`` from ``coreai.concat``
+        # with the diagnostic ``expected the same element type for all
+        # inputs to concat``.
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        coreai_program.optimize()
+        # The fix's job is to normalise every entry of the view shape
+        # ``[1, 1024, h, w]`` to the same canonical rank-1 si32 form
+        # before the dim-vector concat. The check below pins:
+        #   1. The two SymInt entries (h, w) carry rank-1 f32 from the
+        #      round(SymFloat) chain and get explicitly cast to rank-1
+        #      si32 (matching the int constants).
+        #   2. All four operands of the dim-vector concat are rank-1
+        #      si32, so the concat verifier accepts them.
+        #   3. The resulting rank-1 si32 vector of length 4 feeds the
+        #      reshape that builds the final 4-D output.
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %[[ARG0:.*]]: tensor<1x1024x?x?xf16>
+                // CHECK-SAME:    -> (tensor<1x1024x?x?xf16>
+                //
+                // h and w land as rank-1 f32 from round(SymFloat) arithmetic;
+                // the fix casts each to rank-1 si32 so it matches the int
+                // constants in the same dim vector:
+                // CHECK:         %[[H:.+]] = coreai.cast {{.*}} : tensor<1xf32> to tensor<1xsi32>
+                // CHECK:         %[[W:.+]] = coreai.cast {{.*}} : tensor<1xf32> to tensor<1xsi32>
+                //
+                // Dim-vector concat: 4 entries [1, 1024, h, w] → all rank-1 si32:
+                // CHECK:         %[[SHAPE:.+]] = coreai.concat {{.*}} : (tensor<si32>, tensor<1xsi32>, tensor<1xsi32>, tensor<1xsi32>, tensor<1xsi32>) -> tensor<4xsi32>
+                //
+                // Final reshape uses that shape vector to produce the 4-D output.
+                // (After optimize() the inner ``view(1, 1024, -1)`` is fused
+                // away, so the reshape applies directly to %arg0.):
+                // CHECK:         %[[OUT:.+]] = coreai.reshape %[[ARG0]], %[[SHAPE]] : (tensor<1x1024x?x?xf16>, tensor<4xsi32>) -> tensor<1x1024x?x?xf16>
+                // CHECK:         coreai.output %[[OUT]]
+            """,
+        )
 
 
 _SCALAR_PARAMS = pytest.mark.parametrize(
@@ -4063,6 +4319,165 @@ async def test_scatter(
         )
         await validate_numerical_output(
             model=model, x=x, index=index, src=src, dynamic_shapes=dynamic_shapes
+        )
+
+
+class TestMaskedScatter:
+    """Tests for aten.masked_scatter.default → coreai flatten / cumsum-1 /
+    gather / where lowering.
+    """
+
+    class _Model(nn.Module):
+        def forward(self, self_: Tensor, mask: Tensor, src: Tensor) -> Tensor:
+            return torch.masked_scatter(self_, mask, src)
+
+    @staticmethod
+    def _shared_dynamic_shapes(self_: Tensor, src: Tensor) -> dict:
+        """Build dynamic_shapes where self_ and mask share dim objects
+        (torch.export emits an equality guard when traced shapes match)
+        and src has its own independent dim.
+        """
+        dims = {i: torch.export.Dim(f"d{i}", min=1) for i in range(self_.dim())}
+        return {
+            "self_": dims,
+            "mask": dims,
+            "src": {0: torch.export.Dim("s0", min=1)}
+            if src.dim() == 1
+            else _all_dims_dynamic(src, "s"),
+        }
+
+    @pytest.mark.ir
+    def test_lowers_ir_static(self) -> None:
+        """Pin the full operand chain on a static shape."""
+        self_ = torch.zeros(2, 3)
+        mask = torch.tensor([[True, False, True], [False, True, False]])
+        src = torch.arange(1.0, 7.0)
+        program = torch.export.export(
+            self._Model(), args=(self_, mask, src)
+        ).run_decompositions()
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %arg0: tensor<2x3xf32>
+                // CHECK-SAME:    %arg1: tensor<2x3xi1>
+                // CHECK-SAME:    %arg2: tensor<6xf32>
+                // CHECK:         %[[SF:.+]] = coreai.reshape %arg0, %{{.+}} : (tensor<2x3xf32>, tensor<1xsi32>) -> tensor<6xf32>
+                // CHECK:         %[[MF:.+]] = coreai.reshape %arg1, %{{.+}} : (tensor<2x3xi1>, tensor<1xsi32>) -> tensor<6xi1>
+                // CHECK:         %[[VF:.+]] = coreai.reshape %arg2, %{{.+}} : (tensor<6xf32>, tensor<1xsi32>) -> tensor<6xf32>
+                // CHECK:         %[[MI:.+]] = coreai.cast %[[MF]] : tensor<6xi1> to tensor<6xsi32>
+                // CHECK:         %[[CS:.+]] = coreai.scan %[[MI]], %{{.+}}, %{{.+}} combiner = <sum> : (tensor<6xsi32>, tensor<ui32>, tensor<i1>) -> tensor<6xsi32>
+                // CHECK:         %[[IDX:.+]] = coreai.decomposable.broadcasting_sub %[[CS]], %{{.+}} : (tensor<6xsi32>, tensor<si32>) -> tensor<6xsi32>
+                // CHECK:         %[[G:.+]] = coreai.gather_along_axis %[[VF]] at %[[IDX]] along %{{.+}} : (tensor<6xf32>, tensor<6xsi32>, tensor<si32>) to tensor<6xf32>
+                // CHECK:         %[[W:.+]] = coreai.decomposable.broadcasting_where %[[MF]], %[[G]], %[[SF]] : (tensor<6xi1>, tensor<6xf32>, tensor<6xf32>) -> tensor<6xf32>
+                // CHECK:         %[[OUT:.+]] = coreai.reshape %[[W]], %{{.+}} : (tensor<6xf32>, tensor<2xsi32>) -> tensor<2x3xf32>
+                // CHECK:         coreai.output %[[OUT]]
+            """,
+        )
+
+    @pytest.mark.ir
+    def test_lowers_ir_dynamic(self) -> None:
+        """Confirm the same op chain appears under dynamic shapes — shapes
+        become symbolic, but cast/scan/sub/gather/where/reshape order is
+        preserved.
+        """
+        self_ = torch.zeros(2, 3)
+        mask = torch.zeros(2, 3, dtype=torch.bool)
+        src = torch.arange(6.0)
+        dynamic_shapes = self._shared_dynamic_shapes(self_, src)
+        program = torch.export.export(
+            self._Model(), args=(self_, mask, src), dynamic_shapes=dynamic_shapes
+        ).run_decompositions()
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK:       coreai.reshape
+                // CHECK:       coreai.reshape
+                // CHECK:       coreai.reshape
+                // CHECK:       coreai.cast {{.+}} to tensor<{{.*}}xsi32>
+                // CHECK:       coreai.scan {{.+}} combiner = <sum>
+                // CHECK:       coreai.decomposable.broadcasting_sub
+                // CHECK:       coreai.gather_along_axis
+                // CHECK:       coreai.decomposable.broadcasting_where
+                // CHECK:       coreai.reshape
+                // CHECK:       coreai.output
+            """,
+        )
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.int32])
+    async def test_basic(self, dtype: torch.dtype, dynamic: bool) -> None:
+        """self.shape == mask.shape, src is 1-D of length mask.numel()."""
+        self_ = torch.zeros(2, 3, dtype=dtype)
+        mask = torch.tensor([[True, False, True], [False, True, False]])
+        src = torch.arange(1, 7, dtype=dtype)
+        dynamic_shapes = self._shared_dynamic_shapes(self_, src) if dynamic else None
+        await validate_numerical_output(
+            model=self._Model().eval(),
+            self_=self_,
+            mask=mask,
+            src=src,
+            dynamic_shapes=dynamic_shapes,
+        )
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    async def test_all_false_mask(self, dynamic: bool) -> None:
+        """No positions selected — output must equal self unchanged."""
+        self_ = torch.arange(6.0).reshape(2, 3)
+        mask = torch.zeros(2, 3, dtype=torch.bool)
+        src = torch.full((6,), -1.0)
+        dynamic_shapes = self._shared_dynamic_shapes(self_, src) if dynamic else None
+        await validate_numerical_output(
+            model=self._Model().eval(),
+            self_=self_,
+            mask=mask,
+            src=src,
+            dynamic_shapes=dynamic_shapes,
+        )
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    async def test_all_true_mask(self, dynamic: bool) -> None:
+        """All positions selected — output must equal src reshaped to
+        self.shape, with self values fully overwritten.
+        """
+        self_ = torch.zeros(2, 3)
+        mask = torch.ones(2, 3, dtype=torch.bool)
+        src = torch.arange(1.0, 7.0)
+        dynamic_shapes = self._shared_dynamic_shapes(self_, src) if dynamic else None
+        await validate_numerical_output(
+            model=self._Model().eval(),
+            self_=self_,
+            mask=mask,
+            src=src,
+            dynamic_shapes=dynamic_shapes,
+        )
+
+    async def test_src_larger_than_mask_sum(self) -> None:
+        """src may carry more elements than mask.sum(); only the leading
+        mask.sum() are consumed (read flat). The rest are unused.
+        """
+        self_ = torch.zeros(2, 3)
+        mask = torch.tensor([[True, False, True], [False, True, False]])
+        # 10 elements, only first 3 are needed (mask has 3 True positions)
+        src = torch.arange(1.0, 11.0)
+        await validate_numerical_output(
+            model=self._Model().eval(), self_=self_, mask=mask, src=src
+        )
+
+    async def test_broadcast_mask_lower_rank(self) -> None:
+        """mask is rank-1 (3,) and self is rank-2 (2, 3) — mask is
+        right-aligned and broadcasts across the leading dim. Exercises
+        the broadcast_to branch in the lowering.
+        """
+        self_ = torch.zeros(2, 3)
+        mask = torch.tensor([True, False, True])
+        # mask broadcasts to (2, 3) with 4 True positions
+        src = torch.arange(1.0, 5.0)
+        await validate_numerical_output(
+            model=self._Model().eval(), self_=self_, mask=mask, src=src
         )
 
 
@@ -5546,6 +5961,66 @@ class TestUpsampleNearest2d:
             model=model, x=x, target=target, dynamic_shapes=dynamic_shapes
         )
 
+    def test_round_symfloat_size(self) -> None:
+        """Regression for ``upsample_build_output_shape_dynamic``: when
+        the output_size operands are SymInts that come from
+        ``round(SymFloat)`` shape arithmetic — e.g.
+        ``round((num_tokens / aspect_ratio) ** 0.5) * 14`` — the lowering
+        must reshape/cast each (out_h, out_w) operand to rank-1 int32
+        before the concat that builds the output shape. Without the fix,
+        ``coreai.concat`` raises ``ValueError: Operation creation failed``
+        on the mixed-rank / mixed-element-type inputs."""
+
+        class RoundSymFloatUpsample(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                aspect = x.shape[3] / x.shape[2]
+                h = round((1800 / aspect) ** 0.5)
+                w = round((1800 * aspect) ** 0.5)
+                return torch.nn.functional.interpolate(
+                    x, size=(h * 14, w * 14), mode="nearest"
+                )
+
+        x = torch.rand(1, 3, 28, 28, dtype=torch.float16)
+        dynamic_shapes = {
+            "x": {
+                2: torch.export.Dim("h", min=14),
+                3: torch.export.Dim("w", min=14),
+            }
+        }
+        program = torch.export.export(
+            RoundSymFloatUpsample().eval(), args=(x,), dynamic_shapes=dynamic_shapes
+        ).run_decompositions()
+        # Convert must not raise. Pre-fix this raised ``ValueError:
+        # Operation creation failed`` from ``coreai.concat``.
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        coreai_program.optimize()
+        # The output_shape concat must take three rank-1 si32 operands —
+        # the (N, C) slice from x's get_shape, plus normalised out_h and
+        # out_w. Pre-fix, out_h/out_w arrived as rank-1 f32 (from
+        # round(SymFloat) arithmetic) which broke the concat verifier.
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %[[ARG0:.*]]: tensor<1x3x?x?xf16>
+                //
+                // out_h, out_w come in as rank-1 f32 from round-of-symfloat
+                // arithmetic; the fix casts each to rank-1 si32 to match the
+                // (N, C) slice of get_shape (which is also rank-1 si32):
+                // CHECK:         %[[H:.+]] = coreai.cast {{.*}} : tensor<1xf32> to tensor<1xsi32>
+                // CHECK:         %[[W:.+]] = coreai.cast {{.*}} : tensor<1xf32> to tensor<1xsi32>
+                //
+                // Output-shape concat: non_spatial (rank-1 si32, length 2)
+                // + out_h (rank-1 si32) + out_w (rank-1 si32) → rank-1 si32 length 4:
+                // CHECK:         %[[OUT_SHAPE:.+]] = coreai.concat {{.*}} : (tensor<si32>, tensor<2xsi32>, tensor<1xsi32>, tensor<1xsi32>) -> tensor<4xsi32>
+                //
+                // The shape feeds nearest-neighbor interpolate (whole op
+                // matched on one line because the mode attribute is part of
+                // the same SSA statement):
+                // CHECK:         coreai.interpolate {{.+}}, %[[OUT_SHAPE]], {{.+}} {interpolation_mode = #coreai.interpolation_mode<nearest_neighbor>}
+            """,
+        )
+
 
 class TestUpsampleBilinear2d:
     """Test suite for aten.upsample_bilinear2d.vec → coreai.interpolate (linear)."""
@@ -5654,6 +6129,65 @@ class TestUpsampleBilinear2d:
         )
         await validate_numerical_output(
             model=model, x=x, target=target, dynamic_shapes=dynamic_shapes
+        )
+
+    def test_round_symfloat_size(self) -> None:
+        """Regression for ``upsample_build_output_shape_dynamic``: when
+        the output_size operands are SymInts that come from
+        ``round(SymFloat)`` shape arithmetic — e.g.
+        ``round((num_tokens / aspect_ratio) ** 0.5) * 14`` — the lowering
+        must reshape/cast each (out_h, out_w) operand to rank-1 int32
+        before the concat that builds the output shape. Without the fix,
+        ``coreai.concat`` raises ``ValueError: Operation creation failed``
+        on the mixed-rank / mixed-element-type inputs."""
+
+        class RoundSymFloatUpsample(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                aspect = x.shape[3] / x.shape[2]
+                h = round((1800 / aspect) ** 0.5)
+                w = round((1800 * aspect) ** 0.5)
+                return torch.nn.functional.interpolate(
+                    x,
+                    size=(h * 14, w * 14),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+        x = torch.rand(1, 3, 28, 28, dtype=torch.float16)
+        dynamic_shapes = {
+            "x": {
+                2: torch.export.Dim("h", min=14),
+                3: torch.export.Dim("w", min=14),
+            }
+        }
+        program = torch.export.export(
+            RoundSymFloatUpsample().eval(), args=(x,), dynamic_shapes=dynamic_shapes
+        ).run_decompositions()
+        # Convert must not raise. Pre-fix this raised ``ValueError:
+        # Operation creation failed`` from ``coreai.concat``.
+        coreai_program = TorchConverter().add_exported_program(program).to_coreai()
+        coreai_program.optimize()
+        # Same shape concat as the nearest case; only the interpolation
+        # mode tag differs. The fix is in the shape-build path so it
+        # applies identically here.
+        filecheck_pattern(
+            str(coreai_program),
+            check_file="""
+                // CHECK-LABEL: coreai.graph @main
+                // CHECK-SAME:    %[[ARG0:.*]]: tensor<1x3x?x?xf16>
+                //
+                // out_h, out_w cast from rank-1 f32 to rank-1 si32:
+                // CHECK:         %[[H:.+]] = coreai.cast {{.*}} : tensor<1xf32> to tensor<1xsi32>
+                // CHECK:         %[[W:.+]] = coreai.cast {{.*}} : tensor<1xf32> to tensor<1xsi32>
+                //
+                // Output-shape concat: all rank-1 si32 → rank-1 si32 length 4:
+                // CHECK:         %[[OUT_SHAPE:.+]] = coreai.concat {{.*}} : (tensor<si32>, tensor<2xsi32>, tensor<1xsi32>, tensor<1xsi32>) -> tensor<4xsi32>
+                //
+                // The shape feeds bilinear interpolate (whole op matched on
+                // one line because the mode attribute is part of the same
+                // SSA statement):
+                // CHECK:         coreai.interpolate {{.+}}, %[[OUT_SHAPE]], {{.+}} {interpolation_mode = #coreai.interpolation_mode<linear>}
+            """,
         )
 
 
