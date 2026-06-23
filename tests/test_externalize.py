@@ -18,7 +18,12 @@ from coremltools.optimize.torch.quantization import (  # type: ignore [import-un
 )
 from torch.export import Dim
 
-from coreai_torch import ExternalizeSpec, TorchConverter, get_decomp_table
+from coreai_torch import (
+    ExternalizeSpec,
+    TorchConverter,
+    get_decomp_table,
+    mark_for_externalization,
+)
 from coreai_torch.composite_ops import SDPA, GatherMM, RMSNorm, RMSNormImpl
 from coreai_torch.externalize import (
     _derive_composite_io_names,
@@ -2076,6 +2081,46 @@ async def test_externalize_no_matching_submodules_warns(convert) -> None:
         )
 
     await _validate_numerics(coreai_program, model, sample)
+
+
+async def test_externalize_no_call_sites_warns() -> None:
+    """EP exported from an unpatched model: warn and produce a flat conversion.
+
+    If the user exports the model before calling mark_for_externalization,
+    the custom-op call sites are absent.  add_exported_program should emit a
+    UserWarning and convert without externalizing rather than raising.
+    """
+
+    class Norm(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x / x.norm()
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = Norm()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.norm(x)
+
+    torch.manual_seed(0)
+    model = Model().eval()
+    sample = (torch.randn(2, 4),)
+
+    # Export BEFORE patching — no custom-op nodes in the graph.
+    ep = torch.export.export(model, args=sample).run_decompositions(get_decomp_table())
+    markers = mark_for_externalization(model, [Norm])
+
+    with pytest.warns(UserWarning, match="No externalization call sites"):
+        program = (
+            TorchConverter()
+            .add_exported_program(ep, externalize_markers=markers)
+            .to_coreai()
+        )
+
+    # Conversion still succeeds; no submodule graphs emitted.
+    assert program is not None
+    assert markers._exported_modules == []
 
 
 @pytest.mark.parametrize(

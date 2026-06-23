@@ -43,6 +43,7 @@ from ._custom_to_core import _custom_to_core_resolver
 from ._debug_locations import _DebugInfoRecorder
 from ._torch_metal_kernel import TorchMetalKernel
 from ._utils import (
+    _EXTERNALIZE_NAMESPACE,
     _NARROW_TORCH_DTYPE,
     _get_debug_info_enabled,
     _get_mutation_output_name,
@@ -345,7 +346,7 @@ class TorchConverter:
         model patches afterwards.
         """
         has_call_sites = any(
-            n.op == "call_function" and "coreai.externalizer" in str(n.target)
+            n.op == "call_function" and _EXTERNALIZE_NAMESPACE in str(n.target)
             for n in exported_program.graph.nodes
         )
         if not has_call_sites:
@@ -356,6 +357,10 @@ class TorchConverter:
                 UserWarning,
                 stacklevel=3,
             )
+            markers._exported_modules = []
+            self._externalized_modules = []
+            self.exported_program = exported_program
+            return
         _export_submodules(markers, exported_program)
         self._externalized_modules = markers._exported_modules
         self.exported_program = exported_program
