@@ -1532,6 +1532,15 @@ def replace_atan2(values_map: dict[str, Value], node: fx.Node, loc: Location) ->
     When x=0, x is replaced with 1 before the divide solely to avoid NaN/inf; that
     intermediate result is discarded by the final where-select in favour of the x=0 branch.
     atan2(0, 0) = 0 by convention.
+
+    IEEE-754 limitations:
+      - Signed zeros: ``-0.0`` is treated the same as ``+0.0`` because the
+        ``0 > y`` predicate is false for ``y = -0.0``. Results are numerically
+        equal to PyTorch for finite inputs but the sign bit may differ
+        (e.g. ``atan2(-0.0, -1.0)`` returns ``+π`` here, ``-π`` in PyTorch).
+      - Infinities: ``atan2(±inf, ±inf)`` returns NaN because ``inf/inf``
+        produces NaN before ``atan`` is applied. PyTorch returns ``±π/4``
+        or ``±3π/4`` per IEEE-754. Do not pass infinite inputs to this op.
     """
     y, x = _get_operands(values_map, node, [0, 1])
     ele_type = x.type.element_type

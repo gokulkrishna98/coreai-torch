@@ -626,10 +626,10 @@ class TestAtan2:
         )
 
     async def test_x_zero(self) -> None:
-        """x = 0 should yield ±π/2 depending on sign of y."""
+        """x = 0 should yield ±π/2 depending on sign of y; (0, 0) → 0 by convention."""
         model = self.Atan2Model().eval()
-        y = torch.tensor([1.0, -1.0, 2.0, -2.0])
-        x = torch.zeros(4)
+        y = torch.tensor([1.0, -1.0, 2.0, -2.0, 0.0])
+        x = torch.zeros(5)
         await validate_numerical_output(model=model, y=y, x=x)
 
     async def test_y_zero(self) -> None:
