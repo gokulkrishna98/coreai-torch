@@ -358,6 +358,7 @@ class TorchConverter:
                 stacklevel=3,
             )
             markers._exported_modules = []
+            markers.restore()
             self._externalized_modules = []
             self.exported_program = exported_program
             return
