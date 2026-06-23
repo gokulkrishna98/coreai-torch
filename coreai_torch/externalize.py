@@ -20,7 +20,7 @@ submodule's ``forward``, registers the original forward as the fake
 implementation via ``register_fake``, patches ``submodule.forward`` to call
 the custom op, and stamps ``_externalize_config = ExternalizeSpec(...)`` on
 the module.  The model is left patched until ``ExternalizeMarkers.restore()``
-is called (either explicitly or via ``export_submodules``).
+is called (either explicitly or via ``TorchConverter.add_exported_program``).
 
 Phase 2: Prepare (``_prepare_externalized`` / ``_prepare_module_export``)
 -------------------------------------------------------------------------
@@ -38,7 +38,7 @@ from the ``ExportedProgram``'s graph signature (parameters/buffers use their
 target attribute name, user inputs use their forward parameter name). The
 exported program is then decomposed via ``run_decompositions()``.
 
-Phases 2 and 3 are run eagerly inside ``ExternalizeMarkers.export_submodules()``,
+Phases 2 and 3 are run eagerly inside ``TorchConverter.add_exported_program()``,
 which also restores the model in a ``finally`` block.
 
 Phase 4: Emit Core AI IR (``_perform_externalization``)
@@ -447,13 +447,13 @@ def _prepare_externalized(
 class ExternalizeMarkers:
     """Handle returned by :func:`mark_for_externalization`.
 
-    Patches are applied immediately on construction. Call
-    :func:`export_submodules` once the patched model has been exported (or
-    quantized) to run sub-export and restore the model. Pass the markers to
+    Patches are applied immediately on construction. Export or quantize the
+    patched model, then pass the markers to
     :meth:`TorchConverter.add_exported_program` via ``externalize_markers=``.
+    The converter runs the sub-export phase and restores the model internally.
 
-    If you need to abandon the workflow before calling :func:`export_submodules`,
-    call :meth:`restore` explicitly to undo the patches.
+    If you need to abort before reaching the converter, call :meth:`restore`
+    explicitly to undo the patches.
     """
 
     def __init__(
@@ -486,17 +486,15 @@ def mark_for_externalization(
     afterwards captures the call sites as opaque FX nodes that survive every
     downstream transform.
 
-    After exporting (or quantizing) the model, call
-    :func:`export_submodules` with the markers and the resulting
-    ``ExportedProgram``.  That function runs the sub-export phase and restores
-    the original ``forward`` methods::
+    After exporting (or quantizing) the patched model, pass the markers to
+    :meth:`TorchConverter.add_exported_program` — the converter runs the
+    sub-export phase and restores the model internally::
 
         markers = mark_for_externalization(model, [
             ExternalizeSpec(RMSNorm, composite_op_name="rms_norm",
                             composite_attrs=["eps"]),
         ])
         ep = my_export_or_quantize_pipeline(model)
-        export_submodules(markers, ep)
 
         coreai_program = (
             TorchConverter()
@@ -504,14 +502,15 @@ def mark_for_externalization(
             .to_coreai()
         )
 
-    If you need to abort before calling ``export_submodules``, call
-    ``markers.restore()`` to undo the patches.
+    If you need to abort before calling
+    :meth:`TorchConverter.add_exported_program`, call ``markers.restore()``
+    to undo the patches.
     """
     _mark_externalize(model, targets)
     return ExternalizeMarkers(model)
 
 
-def export_submodules(
+def _export_submodules(
     markers: ExternalizeMarkers,
     exported_program: ExportedProgram,
 ) -> None:
@@ -523,9 +522,7 @@ def export_submodules(
     ``forward`` methods are restored in a ``finally`` block regardless of
     whether the export succeeds.
 
-    Call this once after the patched model has been exported or quantized,
-    before passing ``markers`` to
-    :meth:`TorchConverter.add_exported_program`.
+    Called internally by :meth:`TorchConverter.add_exported_program`.
     """
     try:
         preps = _PreparedModules(markers.model, exported_program)

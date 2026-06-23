@@ -63,6 +63,7 @@ from ._validate import validate_exported_program
 from .externalize import (
     ExternalizeMarkers,
     ExternalizeSpec,
+    _export_submodules,
     _ExportedModule,
     _finalize_module_export,
     _mark_externalize,
@@ -338,16 +339,11 @@ class TorchConverter:
     ) -> None:
         """Externalize from a user-supplied, pre-exported :class:`ExternalizeMarkers`.
 
-        Phases 1–3 have already been completed by ``mark_for_externalization``
-        and ``export_submodules``.  This method simply reads the pre-computed
-        :class:`_ExportedModule` list from ``markers`` and stores it for
-        :meth:`_perform_externalization`.
+        Phase 1 (mark) was completed by ``mark_for_externalization``.
+        This method runs phases 2–3 (sub-export) internally and restores the
+        model patches afterwards.
         """
-        if markers._exported_modules is None:
-            raise RuntimeError(
-                "export_submodules() must be called on the ExternalizeMarkers "
-                "before passing them to add_exported_program."
-            )
+        _export_submodules(markers, exported_program)
         self._externalized_modules = markers._exported_modules
         self.exported_program = exported_program
 

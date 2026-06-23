@@ -16,7 +16,6 @@ from .converter import TorchConverter
 from .externalize import (
     ExternalizeMarkers,
     ExternalizeSpec,
-    export_submodules,
     mark_for_externalization,
 )
 
@@ -27,7 +26,6 @@ __all__ = [
     "MetalParameter",
     "TorchConverter",
     "TorchMetalKernel",
-    "export_submodules",
     "get_decomp_table",
     "generate_composite_decl",
     "mark_for_externalization",
