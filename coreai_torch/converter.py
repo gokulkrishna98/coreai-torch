@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -343,6 +344,18 @@ class TorchConverter:
         This method runs phases 2–3 (sub-export) internally and restores the
         model patches afterwards.
         """
+        has_call_sites = any(
+            n.op == "call_function" and "coreai.externalizer" in str(n.target)
+            for n in exported_program.graph.nodes
+        )
+        if not has_call_sites:
+            warnings.warn(
+                "No externalization call sites found in exported_program. "
+                "The model may have been exported before mark_for_externalization "
+                "was called. No submodules will be externalized.",
+                UserWarning,
+                stacklevel=3,
+            )
         _export_submodules(markers, exported_program)
         self._externalized_modules = markers._exported_modules
         self.exported_program = exported_program
