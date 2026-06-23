@@ -285,6 +285,44 @@ def _prepare_module(
     )
     torch.library.register_fake(qualified_name, original_forward)
 
+    def _setup_context(ctx, inputs, output):  # type: ignore[no-untyped-def]
+        ctx.save_for_backward(*[x for x in inputs if isinstance(x, torch.Tensor)])
+        ctx.non_tensor_inputs = [
+            (i, x) for i, x in enumerate(inputs) if not isinstance(x, torch.Tensor)
+        ]
+        ctx.input_requires_grad = [
+            isinstance(x, torch.Tensor) and x.requires_grad for x in inputs
+        ]
+
+    def _backward(ctx, *grad_outputs):  # type: ignore[no-untyped-def]
+        saved = list(ctx.saved_tensors)
+        non_tensor_map = dict(ctx.non_tensor_inputs)
+        # Reconstruct full input list interleaving tensors and non-tensors
+        inputs: list[Any] = []
+        tensor_iter = iter(saved)
+        for i, needs_grad in enumerate(ctx.input_requires_grad):
+            if i in non_tensor_map:
+                inputs.append(non_tensor_map[i])
+            else:
+                t = next(tensor_iter)
+                inputs.append(t.detach().requires_grad_(needs_grad))
+
+        with torch.enable_grad():
+            out = original_forward(*inputs)
+
+        torch.autograd.backward(
+            [out] if isinstance(out, torch.Tensor) else list(out),
+            grad_outputs,
+        )
+        return tuple(
+            x.grad if isinstance(x, torch.Tensor) and x.requires_grad else None
+            for x in inputs
+        )
+
+    torch.library.register_autograd(
+        qualified_name, _backward, setup_context=_setup_context
+    )
+
     def patched_forward(*args, _op=custom_op_fn, **kwargs):  # type: ignore[no-untyped-def]
         return _op(*args, **kwargs)
 

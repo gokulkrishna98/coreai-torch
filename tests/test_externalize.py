@@ -2083,7 +2083,40 @@ async def test_externalize_no_matching_submodules_warns(convert) -> None:
     await _validate_numerics(coreai_program, model, sample)
 
 
-async def test_externalize_no_call_sites_warns() -> None:
+def test_externalize_backward() -> None:
+    """Gradients flow through externalized submodules (register_autograd)."""
+
+    class Norm(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(8))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x * self.weight
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = Norm()
+            self.fc = nn.Linear(8, 1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.fc(self.norm(x))
+
+    torch.manual_seed(0)
+    model = Model().eval()
+    markers = mark_for_externalization(model, [Norm])
+
+    x = torch.randn(2, 8, requires_grad=True)
+    out = model(x)
+    out.sum().backward()
+
+    markers.restore()
+
+    assert x.grad is not None, "grad did not flow back to input"
+    assert model.norm.weight.grad is not None, "grad did not flow to norm.weight"
+    assert model.fc.weight.grad is not None, "grad did not flow to fc.weight"
+
     """EP exported from an unpatched model: warn and produce a flat conversion.
 
     If the user exports the model before calling mark_for_externalization,
