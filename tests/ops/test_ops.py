@@ -652,6 +652,22 @@ class TestAtan2:
         x = torch.randn(4)
         await validate_numerical_output(model=model, y=y, x=x)
 
+    async def test_signed_zeros(self) -> None:
+        """IEEE-754 signed-zero cases: atan2(-0, x) and atan2(y, -0)."""
+        model = self.Atan2Model().eval()
+        # y = -0.0 with various x signs
+        y = torch.tensor([-0.0, -0.0, -0.0, 0.0])
+        x = torch.tensor([-1.0, 1.0, -0.0, -0.0])
+        await validate_numerical_output(model=model, y=y, x=x)
+
+    async def test_infinities(self) -> None:
+        """IEEE-754 both-infinite cases: atan2(±inf, ±inf) → ±π/4 or ±3π/4."""
+        model = self.Atan2Model().eval()
+        inf = float("inf")
+        y = torch.tensor([inf, inf, -inf, -inf])
+        x = torch.tensor([inf, -inf, inf, -inf])
+        await validate_numerical_output(model=model, y=y, x=x)
+
 
 @pytest.mark.parametrize(
     "x",
