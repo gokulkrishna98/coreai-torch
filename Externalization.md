@@ -40,31 +40,34 @@ coreai_program = (
 ### Workflow B — `mark_for_externalization` (decoupled)
 
 Use when an external tool (quantizer, pruner, compiler pass) owns the
-`ExportedProgram`.  Mark the model first, run the tool, then call
-`export_submodules` before converting.
+`ExportedProgram`.  Mark the model first, run the tool, then pass the markers
+to the converter — sub-export and cleanup happen inside `add_exported_program`.
 
 ```python
-from coreai_torch import mark_for_externalization, export_submodules, TorchConverter
+from coreai_torch import mark_for_externalization, TorchConverter
 
 markers = mark_for_externalization(model, [
     ExternalizeSpec(RMSNorm, composite_op_name="rms_norm", composite_attrs=["eps"]),
 ])
 
-ep = quantizer.prepare(model).calibrate(data).finalize()
-# custom op nodes survive quantization — model.forward is still patched here
-
-export_submodules(markers, ep)
-# submodule EPs captured, model.forward restored
+try:
+    ep = quantizer.prepare(model).calibrate(data).finalize()
+    # custom op nodes survive quantization — model.forward is still patched here
+finally:
+    # Safety net: restores model if the export/quantize step throws before
+    # reaching the converter. Idempotent — no-op if converter already restored it.
+    markers.restore()
 
 coreai_program = (
     TorchConverter()
     .add_exported_program(ep, externalize_markers=markers)
+    # sub-export (Phases 2–3) and model restore happen here internally
     .to_coreai()
 )
 ```
 
-If you need to abandon the workflow before calling `export_submodules`, call
-`markers.restore()` to undo the patches explicitly.
+If you need to abort before reaching the converter, `markers.restore()` undoes
+all patches explicitly (it is idempotent — safe to call more than once).
 
 ---
 
@@ -72,55 +75,48 @@ If you need to abandon the workflow before calling `export_submodules`, call
 
 Both workflows execute the same four phases.  In Workflow A all phases run inside
 `to_coreai()`.  In Workflow B, Phase 1 runs at `mark_for_externalization`, Phases 2–3
-run at `export_submodules`, and Phase 4 runs inside `to_coreai()`.
+run inside `add_exported_program`, and Phase 4 runs inside `to_coreai()`.
 
 ```
-  USER CODE (Workflow B)                    to_coreai() (both workflows)
+  USER CODE (Workflow B)                    CONVERTER (both workflows)
   ══════════════════════════════════        ══════════════════════════════════════
 
   ┌─ mark_for_externalization() ──────┐
-  │                                   │     ┌─ Phase 4: Emit Core AI IR ─────────┐
+  │                                   │     ┌─ add_exported_program() ───────────┐
   │  Walk model.named_modules()       │     │                                    │
-  │  For each matching submodule:     │     │  For each _ExportedModule,         │
-  │    • save original forward        │     │  deepest-first:                    │
-  │    • register custom_op           │     │    • build coreai.graph noinline   │
-  │    • patch submodule.forward      │     │    • register coreai.invoke        │
-  │    • stamp _externalize_* attrs   │     │      lowering per FX node name     │
+  │  For each matching submodule:     │     │  Phase 2: Prepare                 │
+  │    • save original forward        │     │    find custom op nodes in ep      │
+  │    • register custom_op           │     │    extract fake inputs + shapes    │
+  │    • patch submodule.forward      │     │    restore submodule.forward       │
+  │    • stamp _externalize_* attrs   │     │    → _PreparedModule per node      │
   │                                   │     │                                    │
-  │  returns ExternalizeMarkers       │     │  Lower parent graph — externalized │
-  └───────────────────────────────────┘     │  nodes emit coreai.invoke calls    │
-              │                             └────────────────────────────────────┘
-              ▼                                            │
-  ┌─ quantizer / export_fn(model) ────┐                   ▼
-  │                                   │        ┌──────────────────────────────┐
-  │  ExportedProgram contains opaque  │        │      coreai.Program          │
-  │  call_function nodes — custom ops │        │  ├── @main                   │
-  │  survive all FX transformations   │        │  │     coreai.invoke          │
-  └───────────────────────────────────┘        │  │       @rms_norm_abc123     │
-              │                                │  ├── @rms_norm_abc123  ◄──── │── noinline subgraph
-              ▼                                │  └── @rms_norm_def456  ◄──── │── second call site
-  ┌─ export_submodules(markers, ep) ──┐        └──────────────────────────────┘
-  │                                   │
-  │  Phase 2: Prepare                 │
-  │    shallowest-first iteration     │
-  │    per marked module:             │
-  │      • find custom op nodes       │
-  │      • extract fake inputs        │
-  │      • extract dynamic shapes     │
-  │      • restore original forward   │
-  │    → _PreparedModule per node     │
-  │                                   │
-  │  Phase 3: Export submodules       │
-  │    per _PreparedModule:           │
-  │      • torch.export.export()      │
-  │      • run_decompositions()       │
-  │      • derive composite I/O names │
-  │    → _ExportedModule per node     │
-  │                                   │
-  │  finally: markers.restore()       │
-  │    remove all _externalize_* attrs│
-  │    model.forward fully restored   │
-  └───────────────────────────────────┘
+  │  returns ExternalizeMarkers       │     │  Phase 3: Export submodules        │
+  └───────────────────────────────────┘     │    torch.export each submodule     │
+              │                             │    run_decompositions()            │
+              ▼                             │    → _ExportedModule per node      │
+  ┌─ quantizer / export_fn(model) ────┐     │                                    │
+  │                                   │     │  finally: markers.restore()        │
+  │  ExportedProgram contains opaque  │     │    model patches fully removed     │
+  │  call_function nodes — custom ops │     └────────────────────────────────────┘
+  │  survive all FX transformations   │                   │
+  └───────────────────────────────────┘                   ▼
+              │                             ┌─ to_coreai() ─────────────────────┐
+              │                             │                                    │
+              └─────────────────────────────►  Phase 4: Emit Core AI IR         │
+                                            │    build coreai.graph noinline    │
+                                            │    register coreai.invoke         │
+                                            │      lowerings per FX node name   │
+                                            └────────────────────────────────────┘
+                                                           │
+                                                           ▼
+                                               ┌──────────────────────────────┐
+                                               │      coreai.Program          │
+                                               │  ├── @main                   │
+                                               │  │     coreai.invoke          │
+                                               │  │       @rms_norm_abc123     │
+                                               │  ├── @rms_norm_abc123  ◄──── │── noinline subgraph
+                                               │  └── @rms_norm_def456  ◄──── │── second call site
+                                               └──────────────────────────────┘
 ```
 
 ---
@@ -172,7 +168,7 @@ body.  Quantizers and decompositions cannot see through them.
 
 ## Phase 2: Prepare
 
-**API:** inside `export_submodules(markers, ep)`
+**API:** inside `add_exported_program(ep, externalize_markers=markers)`
 **Internal:** `_PreparedModules.__iter__` → `_prepare_module_export(submodule, ep)`
 
 Walks marked submodules in **shallowest-first** order and, for each one, finds its
@@ -223,7 +219,7 @@ two distinct `coreai.graph` symbols at runtime.
 
 ## Phase 3: Export Submodules
 
-**API:** inside `export_submodules(markers, ep)`
+**API:** inside `add_exported_program(ep, externalize_markers=markers)`
 **Internal:** `_torch_export_module(prep)` → `_finalize_module_export(prep, inner_ep)`
 
 Re-exports each submodule standalone using the fake inputs and dynamic shapes captured
@@ -271,7 +267,7 @@ in Phase 2.
   )
 ```
 
-After all `_ExportedModule` objects are built, `export_submodules` calls
+After all `_ExportedModule` objects are built, `add_exported_program` calls
 `markers.restore()` in a `finally` block:
 
 ```
@@ -391,11 +387,11 @@ Two ordering rules keep nested externalization correct:
           │
           └──► ExternalizeMarkers
                    ├── _model: nn.Module          (holds the patched model)
-                   ├── _exported_modules: list     (empty until export_submodules())
+                   ├── _exported_modules: list     (empty until add_exported_program())
                    └── _restored: bool
 
                            │
-                    export_submodules()
+                    add_exported_program()
                            │
                            ▼
 
@@ -440,7 +436,7 @@ sub-exporting each submodule in Phase 3.
 
 | File | Role |
 |---|---|
-| `coreai_torch/externalize.py` | Phases 1–3, public API: `mark_for_externalization`, `export_submodules`, `ExternalizeMarkers`, `ExternalizeSpec` |
+| `coreai_torch/externalize.py` | Phases 1–3, public API: `mark_for_externalization`, `ExternalizeMarkers`, `ExternalizeSpec` |
 | `coreai_torch/converter.py` | `add_pytorch_module`, `add_exported_program`, Phase 4 IR emission (`_perform_externalization`) |
 | `coreai_torch/_utils.py` | `_find_all_custom_op_nodes`, `_fake_inputs_from_node`, `_dynamic_shapes_from_node`, `_sanitize_op_name`, `_resolve_name` |
 | `tests/ops/test_externalize.py` | IR-level (`@pytest.mark.ir`) and numerical tests for both workflows |
