@@ -2117,6 +2117,8 @@ def test_externalize_backward() -> None:
     assert model.norm.weight.grad is not None, "grad did not flow to norm.weight"
     assert model.fc.weight.grad is not None, "grad did not flow to fc.weight"
 
+
+def test_externalize_no_call_sites_warns() -> None:
     """EP exported from an unpatched model: warn and produce a flat conversion.
 
     If the user exports the model before calling mark_for_externalization,

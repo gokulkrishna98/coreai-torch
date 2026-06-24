@@ -295,6 +295,11 @@ def _prepare_module(
         ]
 
     def _backward(ctx, *grad_outputs):  # type: ignore[no-untyped-def]
+        # Re-runs original_forward under enable_grad to reconstruct the inner
+        # autograd graph. Cost is ~1.5x a normal backward (forward runs twice).
+        # Stateful submodules (BN running stats, dropout, RNG) are observed
+        # twice per training step — mark_for_externalization is not a
+        # transparent drop-in for training loops with stateful submodules.
         saved = list(ctx.saved_tensors)
         non_tensor_map = dict(ctx.non_tensor_inputs)
         # Reconstruct full input list interleaving tensors and non-tensors

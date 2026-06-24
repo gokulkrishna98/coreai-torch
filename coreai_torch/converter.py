@@ -346,7 +346,7 @@ class TorchConverter:
         model patches afterwards.
         """
         has_call_sites = any(
-            n.op == "call_function" and _EXTERNALIZE_NAMESPACE in str(n.target)
+            n.op == "call_function" and get_namespace(n) == _EXTERNALIZE_NAMESPACE
             for n in exported_program.graph.nodes
         )
         if not has_call_sites:

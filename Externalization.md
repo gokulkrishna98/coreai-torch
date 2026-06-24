@@ -51,6 +51,7 @@ markers = mark_for_externalization(model, [
 ])
 
 try:
+    # Pseudocode — substitute your actual quantizer/tool API here:
     ep = quantizer.prepare(model).calibrate(data).finalize()
     # custom op nodes survive quantization — model.forward is still patched here
 finally:
@@ -163,6 +164,14 @@ returns ExternalizeMarkers(model, exported_modules=[])
 After marking, any call to `model(...)` or `torch.export.export(model, ...)` will
 produce FX graphs containing opaque `call_function` nodes instead of the submodule
 body.  Quantizers and decompositions cannot see through them.
+
+> **Training note:** The autograd registration re-runs `original_forward` under
+> `torch.enable_grad()` on every backward pass to reconstruct the inner graph.
+> This means backward cost is roughly 1.5× a normal backward (forward runs twice),
+> and stateful submodules (BatchNorm running stats, dropout, RNG) are observed
+> twice per training step.  `mark_for_externalization` is **not** a transparent
+> drop-in for training loops with stateful submodules; it is designed for
+> inference and QAT (where the exported model is eval-mode).
 
 ---
 
@@ -439,6 +448,6 @@ sub-exporting each submodule in Phase 3.
 | `coreai_torch/externalize.py` | Phases 1–3, public API: `mark_for_externalization`, `ExternalizeMarkers`, `ExternalizeSpec` |
 | `coreai_torch/converter.py` | `add_pytorch_module`, `add_exported_program`, Phase 4 IR emission (`_perform_externalization`) |
 | `coreai_torch/_utils.py` | `_find_all_custom_op_nodes`, `_fake_inputs_from_node`, `_dynamic_shapes_from_node`, `_sanitize_op_name`, `_resolve_name` |
-| `tests/ops/test_externalize.py` | IR-level (`@pytest.mark.ir`) and numerical tests for both workflows |
+| `tests/test_externalize.py` | IR-level (`@pytest.mark.ir`) and numerical tests for both workflows |
 | `tests/utils.py` | `convert_via_module` / `convert_via_markers` test helpers |
 | `docs/guides/externalization.ipynb` | User-facing notebook guide |
