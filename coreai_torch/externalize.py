@@ -519,6 +519,12 @@ class ExternalizeMarkers:
         methods are always restored in a ``finally`` block regardless of
         whether the export succeeds.
         """
+        if self._restored:
+            raise RuntimeError(
+                "subexport_and_restore has already been called on these markers "
+                "(or the model was already restored after a failed sub-export). "
+                "Create a new ExternalizeMarkers via mark_for_externalization."
+            )
         try:
             preps = _PreparedModules(self._marked, exported_program)
             exts: list[_ExportedModule] = []
