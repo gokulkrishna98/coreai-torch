@@ -361,6 +361,10 @@ class TorchConverter:
             self._externalized_modules = []
             self.exported_program = exported_program
             return
+        if markers._exported_modules is not None:
+            self._externalized_modules = markers._exported_modules
+            self.exported_program = exported_program
+            return
         _export_submodules(markers, exported_program)
         self._externalized_modules = markers._exported_modules
         self.exported_program = exported_program
