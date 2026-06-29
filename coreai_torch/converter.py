@@ -292,7 +292,7 @@ class TorchConverter:
         assert self._export_fn is not None
         assert self._externalize_modules is not None
 
-        _mark_externalize(self._module, self._externalize_modules)
+        marked = _mark_externalize(self._module, self._externalize_modules)
 
         try:
             # Re-export after marking — failure here is our bug, not the user's
@@ -307,9 +307,7 @@ class TorchConverter:
                 ) from e
 
             # Prepare and export each submodule
-            preps: Iterator[_PreparedModule] = _prepare_externalized(
-                self._module, whole_ep
-            )
+            preps: Iterator[_PreparedModule] = _prepare_externalized(marked, whole_ep)
             exts: list[_ExportedModule] = []
             with self._progress_bar.stream("Externalizing submodules") as advance:
                 for prep in preps:
@@ -334,7 +332,7 @@ class TorchConverter:
             self._externalized_modules = exts
             self.exported_program = whole_ep
         finally:
-            _restore_externalized(self._module)
+            _restore_externalized(marked)
 
     def _run_externalize_pipeline_from_markers(
         self, markers: ExternalizeMarkers, exported_program: ExportedProgram

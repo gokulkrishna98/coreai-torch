@@ -394,13 +394,17 @@ def _prepare_module_export(
 def _mark_externalize(
     module: torch.nn.Module,
     targets: list[type | ExternalizeSpec],
-) -> None:
+) -> list[tuple[str, torch.nn.Module]]:
     """Step 1: Walk ``module`` and patch every matching submodule's forward.
 
     For each submodule whose class matches a target, calls
     ``_prepare_module`` (replacing forward with a custom op) and stores
     the ``ExternalizeSpec`` config on the instance. Must be called **before**
     ``torch.export.export``.
+
+    Returns the list of ``(name, submodule)`` pairs that were patched, in
+    traversal order, so callers can restore or iterate them without
+    re-walking the model.
 
     Emits a ``UserWarning`` if any target does not match at least one
     submodule. This is a warning rather than an error because callers
@@ -411,6 +415,7 @@ def _mark_externalize(
         ExternalizeSpec(target_class=t) if isinstance(t, type) else t for t in targets
     ]
     matched = [False] * len(configs)
+    marked: list[tuple[str, torch.nn.Module]] = []
 
     for name, mod in module.named_modules():
         if not name:
@@ -419,6 +424,7 @@ def _mark_externalize(
             if isinstance(mod, config.target_class):
                 _prepare_module(module, mod)
                 mod._externalize_config = config  # type: ignore[attr-defined]
+                marked.append((name, mod))
                 matched[i] = True
                 break
 
@@ -435,6 +441,7 @@ def _mark_externalize(
             f"references.",
             stacklevel=2,
         )
+    return marked
 
 
 class _PreparedModules:
@@ -447,17 +454,12 @@ class _PreparedModules:
 
     def __init__(
         self,
-        model: torch.nn.Module,
+        marked: list[tuple[str, torch.nn.Module]],
         exported_program: ExportedProgram,
     ) -> None:
-        self._model = model
         self._programs: dict[str, ExportedProgram] = {"": exported_program}
         self._wrapped: list[tuple[str, torch.nn.Module]] = sorted(
-            (
-                (name, mod)
-                for name, mod in model.named_modules()
-                if hasattr(mod, "_externalize_name")
-            ),
+            marked,
             key=lambda x: x[0].count("."),
         )
 
@@ -476,7 +478,7 @@ class _PreparedModules:
 
 
 def _prepare_externalized(
-    model: torch.nn.Module,
+    marked: list[tuple[str, torch.nn.Module]],
     exported_program: ExportedProgram,
 ) -> Iterator[_PreparedModule]:
     """Step 3 entry point: yield a ``_PreparedModule`` for every call site.
@@ -484,7 +486,7 @@ def _prepare_externalized(
     Wraps ``_PreparedModules`` which handles shallowest-first ordering and
     nested program lookup.
     """
-    return _PreparedModules(model, exported_program)
+    return _PreparedModules(marked, exported_program)
 
 
 class ExternalizeMarkers:
@@ -501,20 +503,16 @@ class ExternalizeMarkers:
 
     def __init__(
         self,
-        model: torch.nn.Module,
+        marked: list[tuple[str, torch.nn.Module]],
     ) -> None:
-        self._model = model
+        self._marked = marked
         self._exported_modules: list[_ExportedModule] | None = None
         self._restored = False
-
-    @property
-    def model(self) -> torch.nn.Module:
-        return self._model
 
     def restore(self) -> None:
         """Undo all forward patches. Safe to call more than once."""
         if not self._restored:
-            _restore_externalized(self._model)
+            _restore_externalized(self._marked)
             self._restored = True
 
 
@@ -549,8 +547,8 @@ def mark_for_externalization(
     :meth:`TorchConverter.add_exported_program`, call ``markers.restore()``
     to undo the patches.
     """
-    _mark_externalize(model, targets)
-    return ExternalizeMarkers(model)
+    marked = _mark_externalize(model, targets)
+    return ExternalizeMarkers(marked)
 
 
 def _export_submodules(
@@ -568,7 +566,7 @@ def _export_submodules(
     Called internally by :meth:`TorchConverter.add_exported_program`.
     """
     try:
-        preps = _PreparedModules(markers.model, exported_program)
+        preps = _PreparedModules(markers._marked, exported_program)
         exts: list[_ExportedModule] = []
         for prep in preps:
             inner_ep = _torch_export_module(prep)
@@ -579,13 +577,13 @@ def _export_submodules(
         markers.restore()
 
 
-def _restore_externalized(module: torch.nn.Module) -> None:
+def _restore_externalized(marked: list[tuple[str, torch.nn.Module]]) -> None:
     """Step 6: Undo all patches from step 1.
 
     Restores original forward methods and removes all externalization markers.
     Called after the pipeline completes (or on error via ``finally``).
     """
-    for _name, mod in module.named_modules():
+    for _name, mod in marked:
         original = getattr(mod, "_original_forward", None)
         if original is not None:
             mod.forward = original
