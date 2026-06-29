@@ -28,6 +28,7 @@ from coreai_torch.composite_ops import SDPA, GatherMM, RMSNorm, RMSNormImpl
 from coreai_torch.externalize import (
     _derive_composite_io_names,
     _prepare_module,
+    _restore_externalized,
 )
 
 from .utils import (
@@ -2111,7 +2112,7 @@ def test_externalize_backward() -> None:
     out = model(x)
     out.sum().backward()
 
-    markers.restore()
+    _restore_externalized(markers._marked)
 
     assert x.grad is not None, "grad did not flow back to input"
     assert model.norm.weight.grad is not None, "grad did not flow to norm.weight"

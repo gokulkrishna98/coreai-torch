@@ -493,12 +493,13 @@ class ExternalizeMarkers:
     """Handle returned by :func:`mark_for_externalization`.
 
     Patches are applied immediately on construction. Export or quantize the
-    patched model, then pass the markers to
-    :meth:`TorchConverter.add_exported_program` via ``externalize_markers=``.
-    The converter runs the sub-export phase and restores the model internally.
+    patched model, then call :meth:`subexport_and_restore` with the resulting
+    ``ExportedProgram`` before passing the markers to
+    :meth:`TorchConverter.add_exported_program`.
 
-    If you need to abort before reaching the converter, call :meth:`restore`
-    explicitly to undo the patches.
+    Alternatively, pass the markers directly to
+    :meth:`TorchConverter.add_exported_program` and the converter will call
+    :meth:`subexport_and_restore` internally.
     """
 
     def __init__(
@@ -509,9 +510,24 @@ class ExternalizeMarkers:
         self._exported_modules: list[_ExportedModule] | None = None
         self._restored = False
 
-    def restore(self) -> None:
-        """Undo all forward patches. Safe to call more than once."""
-        if not self._restored:
+    def subexport_and_restore(self, exported_program: ExportedProgram) -> None:
+        """Run sub-export (Phases 2–3) and restore all forward patches.
+
+        Finds every custom-op call site in ``exported_program``, runs
+        ``torch.export.export`` on each patched submodule, and stores the
+        resulting :class:`_ExportedModule` list. The original ``forward``
+        methods are always restored in a ``finally`` block regardless of
+        whether the export succeeds.
+        """
+        try:
+            preps = _PreparedModules(self._marked, exported_program)
+            exts: list[_ExportedModule] = []
+            for prep in preps:
+                inner_ep = _torch_export_module(prep)
+                inner_ep = inner_ep.run_decompositions()
+                exts.append(_finalize_module_export(prep, inner_ep))
+            self._exported_modules = exts
+        finally:
             _restore_externalized(self._marked)
             self._restored = True
 
@@ -527,15 +543,17 @@ def mark_for_externalization(
     afterwards captures the call sites as opaque FX nodes that survive every
     downstream transform.
 
-    After exporting (or quantizing) the patched model, pass the markers to
-    :meth:`TorchConverter.add_exported_program` — the converter runs the
-    sub-export phase and restores the model internally::
+    After exporting (or quantizing) the patched model, call
+    :meth:`ExternalizeMarkers.subexport_and_restore` with the resulting
+    ``ExportedProgram``, then pass the markers to
+    :meth:`TorchConverter.add_exported_program`::
 
         markers = mark_for_externalization(model, [
             ExternalizeSpec(RMSNorm, composite_op_name="rms_norm",
                             composite_attrs=["eps"]),
         ])
         ep = my_export_or_quantize_pipeline(model)
+        markers.subexport_and_restore(ep)
 
         coreai_program = (
             TorchConverter()
@@ -543,9 +561,9 @@ def mark_for_externalization(
             .to_coreai()
         )
 
-    If you need to abort before calling
-    :meth:`TorchConverter.add_exported_program`, call ``markers.restore()``
-    to undo the patches.
+    Alternatively, skip :meth:`~ExternalizeMarkers.subexport_and_restore` and
+    pass the markers directly to :meth:`TorchConverter.add_exported_program` —
+    the converter will call it internally.
     """
     marked = _mark_externalize(model, targets)
     return ExternalizeMarkers(marked)
@@ -557,24 +575,10 @@ def _export_submodules(
 ) -> None:
     """Run sub-export (Phases 2–3) and restore the model.
 
-    Finds every custom-op call site in ``exported_program``, runs
-    ``torch.export.export`` on each patched submodule, and stores the
-    resulting :class:`_ExportedModule` list on ``markers``.  The original
-    ``forward`` methods are restored in a ``finally`` block regardless of
-    whether the export succeeds.
-
+    Delegates to :meth:`ExternalizeMarkers.subexport_and_restore`.
     Called internally by :meth:`TorchConverter.add_exported_program`.
     """
-    try:
-        preps = _PreparedModules(markers._marked, exported_program)
-        exts: list[_ExportedModule] = []
-        for prep in preps:
-            inner_ep = _torch_export_module(prep)
-            inner_ep = inner_ep.run_decompositions()
-            exts.append(_finalize_module_export(prep, inner_ep))
-        markers._exported_modules = exts
-    finally:
-        markers.restore()
+    markers.subexport_and_restore(exported_program)
 
 
 def _restore_externalized(marked: list[tuple[str, torch.nn.Module]]) -> None:
