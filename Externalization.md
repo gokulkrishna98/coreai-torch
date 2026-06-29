@@ -158,7 +158,7 @@ Patches are applied immediately when `mark_for_externalization` is called.
   │
   └── lm_head        isinstance(mod, RMSNorm) ✗  (skipped)
 
-returns ExternalizeMarkers(model, exported_modules=[])
+returns ExternalizeMarkers(marked=[(name, submodule), ...], exported_modules=[])
 ```
 
 After marking, any call to `model(...)` or `torch.export.export(model, ...)` will
@@ -283,9 +283,9 @@ After all `_ExportedModule` objects are built, `add_exported_program` calls
   finally:
       markers.restore()
           │
-          └── _restore_externalized(model)
+          └── _restore_externalized(markers._marked)
                   │
-                  for each patched submodule:
+                  for each (name, mod) in _marked:
                       mod.forward = mod._original_forward
                       del mod._original_forward
                       del mod._externalize_name
@@ -395,8 +395,8 @@ Two ordering rules keep nested externalization correct:
   mark_for_externalization()
           │
           └──► ExternalizeMarkers
-                   ├── _model: nn.Module          (holds the patched model)
-                   ├── _exported_modules: list     (empty until add_exported_program())
+                   ├── _marked: list[tuple[str, nn.Module]]  (patched submodules, collected at mark time)
+                   ├── _exported_modules: list               (empty until add_exported_program())
                    └── _restored: bool
 
                            │
