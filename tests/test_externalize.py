@@ -2119,6 +2119,123 @@ def test_externalize_backward() -> None:
     assert model.fc.weight.grad is not None, "grad did not flow to fc.weight"
 
 
+def test_externalize_backward_non_tensor_input() -> None:
+    """Gradients flow correctly when the submodule takes a non-tensor (float) input."""
+
+    class ScaledNorm(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(8))
+
+        def forward(self, x: torch.Tensor, scale: float) -> torch.Tensor:
+            return x * self.weight * scale
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = ScaledNorm()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.norm(x, 2.0)
+
+    torch.manual_seed(0)
+    model = Model().eval()
+    markers = mark_for_externalization(model, [ScaledNorm])
+
+    x = torch.randn(2, 8, requires_grad=True)
+    out = model(x)
+    out.sum().backward()
+
+    _restore_externalized(markers._marked)
+
+    assert x.grad is not None, "grad did not flow back to input"
+    assert model.norm.weight.grad is not None, "grad did not flow to norm.weight"
+
+
+def test_externalize_backward_tuple_output() -> None:
+    """Gradients flow correctly when the submodule returns multiple tensors."""
+
+    class SplitNorm(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(8))
+
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            normed = x * self.weight
+            return normed, normed.sum(dim=-1, keepdim=True)
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = SplitNorm()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            out, scale = self.norm(x)
+            return out * scale
+
+    torch.manual_seed(0)
+    model = Model().eval()
+    markers = mark_for_externalization(model, [SplitNorm])
+
+    x = torch.randn(2, 8, requires_grad=True)
+    out = model(x)
+    out.sum().backward()
+
+    _restore_externalized(markers._marked)
+
+    assert x.grad is not None, "grad did not flow back to input"
+    assert model.norm.weight.grad is not None, "grad did not flow to norm.weight"
+
+
+def test_externalize_partial_call_sites_warns() -> None:
+    """Per-module warning when only some marked submodules have call sites in the EP."""
+
+    class NormA(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x / x.norm()
+
+    class NormB(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x - x.mean()
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = NormA()
+            self.b = NormB()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.a(x) + self.b(x)
+
+    torch.manual_seed(0)
+    model = Model().eval()
+    sample = (torch.randn(2, 4),)
+
+    # Mark both, but export before NormB is patched (simulate partial mismatch by
+    # exporting before marking, then only marking NormB manually afterwards).
+    ep = torch.export.export(model, args=sample).run_decompositions(get_decomp_table())
+    # After export, patch both so markers._marked has two entries but EP has none.
+    markers = mark_for_externalization(model, [NormA, NormB])
+
+    with pytest.warns(UserWarning) as caught:
+        program = (
+            TorchConverter()
+            .add_exported_program(ep, externalize_markers=markers)
+            .to_coreai()
+        )
+
+    warned_msgs = [str(w.message) for w in caught]
+    assert any("'a'" in m for m in warned_msgs), (
+        f"expected warning for 'a', got: {warned_msgs}"
+    )
+    assert any("'b'" in m for m in warned_msgs), (
+        f"expected warning for 'b', got: {warned_msgs}"
+    )
+
+    assert program is not None
+    assert markers._exported_modules == []
+
+
 def test_externalize_no_call_sites_warns() -> None:
     """EP exported from an unpatched model: warn and produce a flat conversion.
 
@@ -2147,7 +2264,9 @@ def test_externalize_no_call_sites_warns() -> None:
     ep = torch.export.export(model, args=sample).run_decompositions(get_decomp_table())
     markers = mark_for_externalization(model, [Norm])
 
-    with pytest.warns(UserWarning, match="No externalization call sites"):
+    with pytest.warns(
+        UserWarning, match="No call sites found for externalized submodule 'norm'"
+    ):
         program = (
             TorchConverter()
             .add_exported_program(ep, externalize_markers=markers)

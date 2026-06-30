@@ -50,25 +50,20 @@ markers = mark_for_externalization(model, [
     ExternalizeSpec(RMSNorm, composite_op_name="rms_norm", composite_attrs=["eps"]),
 ])
 
-try:
-    # Pseudocode — substitute your actual quantizer/tool API here:
-    ep = quantizer.prepare(model).calibrate(data).finalize()
-    # custom op nodes survive quantization — model.forward is still patched here
-finally:
-    # Safety net: restores model if the export/quantize step throws before
-    # reaching the converter. Idempotent — no-op if converter already restored it.
-    markers.restore()
+# Pseudocode — substitute your actual quantizer/tool API here:
+ep = quantizer.prepare(model).calibrate(data).finalize()
+# custom op nodes survive quantization — model.forward is still patched here
 
 coreai_program = (
     TorchConverter()
     .add_exported_program(ep, externalize_markers=markers)
-    # sub-export (Phases 2–3) and model restore happen here internally
+    # sub-export (Phases 2–3) and model restore happen here via try/finally internally
     .to_coreai()
 )
 ```
 
-If you need to abort before reaching the converter, `markers.restore()` undoes
-all patches explicitly (it is idempotent — safe to call more than once).
+`add_exported_program` restores the model internally via a `try/finally` inside
+`subexport_and_restore`, so no manual restore call is needed.
 
 ---
 
@@ -96,7 +91,7 @@ run inside `add_exported_program`, and Phase 4 runs inside `to_coreai()`.
               │                             │    run_decompositions()            │
               ▼                             │    → _ExportedModule per node      │
   ┌─ quantizer / export_fn(model) ────┐     │                                    │
-  │                                   │     │  finally: markers.restore()        │
+  │                                   │     │  finally: _restore_externalized()  │
   │  ExportedProgram contains opaque  │     │    model patches fully removed     │
   │  call_function nodes — custom ops │     └────────────────────────────────────┘
   │  survive all FX transformations   │                   │
@@ -276,21 +271,19 @@ in Phase 2.
   )
 ```
 
-After all `_ExportedModule` objects are built, `add_exported_program` calls
-`markers.restore()` in a `finally` block:
+After all `_ExportedModule` objects are built, `subexport_and_restore` runs
+`_restore_externalized(self._marked)` in a `finally` block:
 
 ```
   finally:
-      markers.restore()
+      _restore_externalized(markers._marked)
           │
-          └── _restore_externalized(markers._marked)
-                  │
-                  for each (name, mod) in _marked:
-                      mod.forward = mod._original_forward
-                      del mod._original_forward
-                      del mod._externalize_name
-                      del mod._externalize_op_name
-                      del mod._externalize_config   (if present)
+          └── for each (name, mod) in _marked:
+                  mod.forward = mod._original_forward
+                  del mod._original_forward
+                  del mod._externalize_name
+                  del mod._externalize_op_name
+                  del mod._externalize_config   (if present)
 ```
 
 The model is now in exactly the state it was before `mark_for_externalization`.

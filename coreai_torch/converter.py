@@ -43,8 +43,8 @@ from ._custom_to_core import _custom_to_core_resolver
 from ._debug_locations import _DebugInfoRecorder
 from ._torch_metal_kernel import TorchMetalKernel
 from ._utils import (
-    _EXTERNALIZE_NAMESPACE,
     _NARROW_TORCH_DTYPE,
+    _find_all_custom_op_nodes,
     _get_debug_info_enabled,
     _get_mutation_output_name,
     _get_verify_debuginfo_locations_enabled,
@@ -65,7 +65,6 @@ from ._validate import validate_exported_program
 from .externalize import (
     ExternalizeMarkers,
     ExternalizeSpec,
-    _export_submodules,
     _ExportedModule,
     _finalize_module_export,
     _mark_externalize,
@@ -343,29 +342,73 @@ class TorchConverter:
         This method runs phases 2–3 (sub-export) internally and restores the
         model patches afterwards.
         """
-        has_call_sites = any(
-            n.op == "call_function" and get_namespace(n) == _EXTERNALIZE_NAMESPACE
-            for n in exported_program.graph.nodes
-        )
-        if not has_call_sites:
-            warnings.warn(
-                "No externalization call sites found in exported_program. "
-                "The model may have been exported before mark_for_externalization "
-                "was called. No submodules will be externalized.",
-                UserWarning,
-                stacklevel=3,
-            )
-            markers._exported_modules = []
-            _restore_externalized(markers._marked)
-            markers._restored = True
-            self._externalized_modules = []
-            self.exported_program = exported_program
-            return
+        # If the user already ran subexport_and_restore themselves, reuse the result.
         if markers._exported_modules is not None:
             self._externalized_modules = markers._exported_modules
             self.exported_program = exported_program
             return
-        _export_submodules(markers, exported_program)
+
+        # Per-module call-site check: warn and skip modules with no call sites rather
+        # than letting _prepare_module_export raise an opaque ValueError later.
+        # Only check top-level marked modules; nested ones (enclosed inside another
+        # marked module) do not appear in the top-level EP — they show up in the
+        # sub-export of their enclosing module.
+        marked_names = {name for name, _ in markers._marked}
+
+        def _is_top_level(name: str) -> bool:
+            parts = name.split(".")
+            return not any(
+                ".".join(parts[:i]) in marked_names for i in range(1, len(parts))
+            )
+
+        missing_names = {
+            name
+            for name, mod in markers._marked
+            if _is_top_level(name)
+            and not _find_all_custom_op_nodes(
+                exported_program, mod._externalize_op_name
+            )  # type: ignore[attr-defined]
+        }
+        if missing_names:
+            for name in sorted(missing_names):
+                warnings.warn(
+                    f"No call sites found for externalized submodule '{name}' in "
+                    "exported_program. It will not be externalized. The model may "
+                    "have been exported before mark_for_externalization was called.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+
+            # Also drop nested modules whose top-level parent is absent — their
+            # call sites only appear in the parent's sub-export, which won't run.
+            def _is_under_missing(name: str) -> bool:
+                parts = name.split(".")
+                return any(
+                    ".".join(parts[:i]) in missing_names for i in range(1, len(parts))
+                )
+
+            all_to_remove = {
+                n
+                for n, _ in markers._marked
+                if n in missing_names or _is_under_missing(n)
+            }
+            # Restore patches for removed modules now; remaining ones are
+            # restored inside subexport_and_restore's finally block.
+            _restore_externalized(
+                [(n, m) for n, m in markers._marked if n in all_to_remove]
+            )
+            markers._marked = [
+                (n, m) for n, m in markers._marked if n not in all_to_remove
+            ]
+
+        if not markers._marked:
+            markers._exported_modules = []
+            markers._restored = True
+            self._externalized_modules = []
+            self.exported_program = exported_program
+            return
+
+        markers.subexport_and_restore(exported_program)
         self._externalized_modules = markers._exported_modules
         self.exported_program = exported_program
 

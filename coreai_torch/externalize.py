@@ -270,6 +270,13 @@ def _prepare_module(
     Called by ``_mark_externalize`` for each matching submodule. Saves the
     original forward as ``_original_forward`` and attaches ``_externalize_name``
     and ``_externalize_op_name`` markers for later steps.
+
+    .. note:: PyTorch library registrations are **process-global**. Calling
+       ``mark_for_externalization`` twice on the same model (or on two models
+       whose submodule paths sanitize to the same op name) will raise from
+       ``torch.library`` on the second call. Restore the model between calls
+       but do not re-mark the same model in the same process without a unique
+       op name.
     """
     name = _resolve_name(model, submodule)
     op_name = _sanitize_op_name(name)
@@ -573,18 +580,6 @@ def mark_for_externalization(
     """
     marked = _mark_externalize(model, targets)
     return ExternalizeMarkers(marked)
-
-
-def _export_submodules(
-    markers: ExternalizeMarkers,
-    exported_program: ExportedProgram,
-) -> None:
-    """Run sub-export (Phases 2–3) and restore the model.
-
-    Delegates to :meth:`ExternalizeMarkers.subexport_and_restore`.
-    Called internally by :meth:`TorchConverter.add_exported_program`.
-    """
-    markers.subexport_and_restore(exported_program)
 
 
 def _restore_externalized(marked: list[tuple[str, torch.nn.Module]]) -> None:
