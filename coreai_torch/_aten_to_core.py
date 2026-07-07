@@ -874,13 +874,20 @@ def replace_div_tensor_mode(
         else (node.args[2] if len(node.args) > 2 else None)
     )
 
+    if rounding_mode is None:
+        # True divide: integer operands must promote to the node's float
+        # output type before dividing, not the generic same-kind-stays-integer
+        # promotion rule used by "floor"/"trunc" below.
+        result_type = get_output_element_type_from_node(node)
+        return coreai.broadcasting_divide(
+            coreai.cast(x, result_type), coreai.cast(y, result_type)
+        )
+
     promoted_type = get_promoted_type(x.type, y.type)
     casted_x = coreai.cast(x, promoted_type)
     casted_y = coreai.cast(y, promoted_type)
 
-    if rounding_mode is None:
-        return coreai.broadcasting_divide(casted_x, casted_y)
-    elif rounding_mode == "floor":
+    if rounding_mode == "floor":
         return coreai.broadcasting_floor_divide(casted_x, casted_y)
     elif rounding_mode == "trunc":
         # Integer division already truncates toward zero, so a plain divide

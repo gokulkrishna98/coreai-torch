@@ -1576,6 +1576,31 @@ async def test_div_scalar_integer_promotes_to_float() -> None:
     await validate_numerical_output(model=DivScalarModel().eval(), x=x)
 
 
+async def test_true_divide_integer_promotes_to_float() -> None:
+    """aten.true_divide.Tensor on integer operands must promote to float before dividing."""
+    x = torch.tensor([7, -7, 3, 1], dtype=torch.int32)
+    y = torch.tensor([2, 2, 2, 4], dtype=torch.int32)
+
+    class TrueDivideModel(nn.Module):
+        def forward(self, x: Tensor, y: Tensor) -> Tensor:
+            return torch.true_divide(x, y)
+
+    await validate_numerical_output(model=TrueDivideModel().eval(), x=x, y=y)
+
+
+async def test_div_tensor_mode_none_integer_promotes_to_float() -> None:
+    """aten.div.Tensor_mode with rounding_mode=None on integer operands must
+    promote to float before dividing, matching aten.div.Tensor semantics."""
+    x = torch.tensor([7, -7, 3, 1], dtype=torch.int32)
+    y = torch.tensor([2, 2, 2, 4], dtype=torch.int32)
+
+    class DivTensorModeModel(nn.Module):
+        def forward(self, x: Tensor, y: Tensor) -> Tensor:
+            return torch.div(x, y, rounding_mode=None)
+
+    await validate_numerical_output(model=DivTensorModeModel().eval(), x=x, y=y)
+
+
 @pytest.mark.parametrize(
     "x,y",
     [
