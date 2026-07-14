@@ -17,12 +17,14 @@ if platform.system() == "Darwin":
     import mlx  # type: ignore[import-not-found, unused-ignore]
     import mlx.core  # type: ignore[import-not-found, unused-ignore]
 
-from coreai_torch import ExternalizeSpec, TorchConverter, get_decomp_table
+from coreai_torch import ExternalizeSpec, get_decomp_table
 from coreai_torch.composite_ops import GatherMM
 
 from ..utils import (
     _mlx_array_to_numpy_array,
     _torch_tensor_to_numpy_array,
+    convert_via_markers,
+    convert_via_module,
     filecheck_pattern,
     validate_numerical_output,
 )
@@ -243,11 +245,14 @@ class TestTorchGatherMMConversion:
             composite_attrs=["num_batch_axes"],
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    def test_gather_mm_in_moe_ir(dynamic: bool, dtype: torch.dtype) -> None:
+    def test_gather_mm_in_moe_ir(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Validate the Mixture-of-Experts (MoE) use case of gather_mm composite op IR."""
         batch_size = 1  # TODO: Test batch size > 1 if found use case
         q_len = 6
@@ -291,21 +296,14 @@ class TestTorchGatherMMConversion:
                 "rhs": {},
                 "rhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight_transpose, rhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight_transpose, rhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         q = "?" if dynamic else q_len
@@ -321,10 +319,13 @@ class TestTorchGatherMMConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    async def test_gather_mm_in_moe(dynamic: bool, dtype: torch.dtype) -> None:
+    async def test_gather_mm_in_moe(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Validate the Mixture-of-Experts (MoE) use case of gather_mm composite op."""
         batch_size = 1  # TODO: Test batch size > 1 if found use case
         q_len = 6
@@ -370,21 +371,14 @@ class TestTorchGatherMMConversion:
                 "rhs": {},
                 "rhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight_transpose, rhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight_transpose, rhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         await validate_numerical_output(
@@ -401,11 +395,16 @@ class TestTorchGatherMMConversion:
             rhs_indices=rhs_indices,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    def test_gather_mm_with_lhs_indices_ir(dynamic: bool, dtype: torch.dtype) -> None:
+    def test_gather_mm_with_lhs_indices_ir(
+        dynamic: bool, dtype: torch.dtype, convert
+    ) -> None:
         """Validate gather_mm with lhs_indices to gather expert activations (IR)."""
         num_experts = 8
         embed_dim = 64
@@ -448,21 +447,14 @@ class TestTorchGatherMMConversion:
                 "rhs": {},
                 "lhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight, lhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight, lhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         dt = {torch.float32: "f32", torch.float16: "f16", torch.bfloat16: "bf16"}[dtype]
@@ -473,11 +465,14 @@ class TestTorchGatherMMConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     async def test_gather_mm_with_lhs_indices(
-        dynamic: bool, dtype: torch.dtype
+        dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Validate gather_mm with lhs_indices to gather expert activations."""
         num_experts = 8
@@ -523,21 +518,14 @@ class TestTorchGatherMMConversion:
                 "rhs": {},
                 "lhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight, lhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight, lhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         await validate_numerical_output(
@@ -554,11 +542,16 @@ class TestTorchGatherMMConversion:
             lhs_indices=lhs_indices,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    def test_gather_mm_with_both_indices_ir(dynamic: bool, dtype: torch.dtype) -> None:
+    def test_gather_mm_with_both_indices_ir(
+        dynamic: bool, dtype: torch.dtype, convert
+    ) -> None:
         """Validate gather_mm with both lhs_indices and rhs_indices (IR)."""
         num_experts = 8
         embed_dim = 64
@@ -613,21 +606,14 @@ class TestTorchGatherMMConversion:
                 "lhs_indices": {1: q_len_dim},
                 "rhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight, lhs_indices, rhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight, lhs_indices, rhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         dt = {torch.float32: "f32", torch.float16: "f16", torch.bfloat16: "bf16"}[dtype]
@@ -638,11 +624,14 @@ class TestTorchGatherMMConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     async def test_gather_mm_with_both_indices(
-        dynamic: bool, dtype: torch.dtype
+        dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Validate gather_mm with both lhs_indices and rhs_indices."""
         num_experts = 8
@@ -700,21 +689,14 @@ class TestTorchGatherMMConversion:
                 "lhs_indices": {1: q_len_dim},
                 "rhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight, lhs_indices, rhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight, lhs_indices, rhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         await validate_numerical_output(
@@ -732,12 +714,15 @@ class TestTorchGatherMMConversion:
             rhs_indices=rhs_indices,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     def test_gather_mm_in_moe_with_fused_proj_ir(
-        dynamic: bool, dtype: torch.dtype
+        dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Validate the MoE with fused gate and up linear projections use case (IR).
 
@@ -796,21 +781,14 @@ class TestTorchGatherMMConversion:
                 "rhs1": {},
                 "rhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight_transpose0, weight_transpose1, rhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight_transpose0, weight_transpose1, rhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         q = "?" if dynamic else q_len
@@ -833,11 +811,14 @@ class TestTorchGatherMMConversion:
         """
         filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dynamic", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
     async def test_gather_mm_in_moe_with_fused_proj(
-        dynamic: bool, dtype: torch.dtype
+        dynamic: bool, dtype: torch.dtype, convert
     ) -> None:
         """Validate the MoE with fused gate and up linear projections use case.
 
@@ -909,21 +890,14 @@ class TestTorchGatherMMConversion:
                 "rhs1": {},
                 "rhs_indices": {1: q_len_dim},
             }
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m,
-                    args=(x, weight_transpose0, weight_transpose1, rhs_indices),
-                    dynamic_shapes=dynamic_shapes,
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchGatherMMConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m,
+                args=(x, weight_transpose0, weight_transpose1, rhs_indices),
+                dynamic_shapes=dynamic_shapes,
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchGatherMMConversion._make_externalize_spec()],
         )
 
         await validate_numerical_output(

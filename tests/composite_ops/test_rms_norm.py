@@ -27,12 +27,14 @@ if platform.system() == "Darwin":
     import mlx.core  # type: ignore[import-not-found, unused-ignore]
     import mlx.nn  # type: ignore[import-not-found, unused-ignore]
 
-from coreai_torch import ExternalizeSpec, TorchConverter, get_decomp_table
+from coreai_torch import ExternalizeSpec, get_decomp_table
 from coreai_torch.composite_ops import RMSNorm, RMSNormImpl
 
 from ..utils import (
     _mlx_array_to_numpy_array,
     _torch_tensor_to_numpy_array,
+    convert_via_markers,
+    convert_via_module,
     filecheck_pattern,
     validate_numerical_output,
 )
@@ -351,11 +353,14 @@ class TestTorchRMSNormConversion:
             composite_attrs=["axes", "eps"],
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    def test_rms_norm_basic_ir(dynamic: bool, dtype: torch.dtype) -> None:
+    def test_rms_norm_basic_ir(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Test the rms_norm composite operation IR."""
 
         class WrapperModel(torch.nn.Module):
@@ -374,19 +379,12 @@ class TestTorchRMSNormConversion:
             batch_dim = torch.export.Dim("batch_size", min=1, max=32)
             seq_dim = torch.export.Dim("seq_len", min=1, max=64)
             export_dynamic_shapes = {"x": {0: batch_dim, 1: seq_dim}}
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchRMSNormConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x,), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRMSNormConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else 2
@@ -409,10 +407,13 @@ class TestTorchRMSNormConversion:
             check_file=truth,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    async def test_rms_norm_basic(dynamic: bool, dtype: torch.dtype) -> None:
+    async def test_rms_norm_basic(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Test the rms_norm composite operation."""
 
         class WrapperModel(torch.nn.Module):
@@ -431,19 +432,12 @@ class TestTorchRMSNormConversion:
             batch_dim = torch.export.Dim("batch_size", min=1, max=32)
             seq_dim = torch.export.Dim("seq_len", min=1, max=64)
             export_dynamic_shapes = {"x": {0: batch_dim, 1: seq_dim}}
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchRMSNormConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x,), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRMSNormConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x)
@@ -459,9 +453,12 @@ class TestTorchRMSNormConversion:
             x=x,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @staticmethod
-    def test_rms_norm_scalar_input_ir() -> None:
+    def test_rms_norm_scalar_input_ir(convert) -> None:
         """Test rms_norm with scalar input IR."""
 
         class WrapperModel(torch.nn.Module):
@@ -474,19 +471,12 @@ class TestTorchRMSNormConversion:
 
         model = WrapperModel().eval()
         x = torch.ones(1, dtype=torch.float32)
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,)
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchRMSNormConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(m, args=(x,)).run_decompositions(
+                get_decomp_table()
+            ),
+            externalize_modules=[TestTorchRMSNormConversion._make_externalize_spec()],
         )
 
         truth = """
@@ -505,8 +495,11 @@ class TestTorchRMSNormConversion:
             check_file=truth,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @staticmethod
-    async def test_rms_norm_scalar_input() -> None:
+    async def test_rms_norm_scalar_input(convert) -> None:
         """Test rms_norm with scalar input."""
 
         class WrapperModel(torch.nn.Module):
@@ -519,19 +512,12 @@ class TestTorchRMSNormConversion:
 
         model = WrapperModel().eval()
         x = torch.ones(1, dtype=torch.float32)
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,)
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchRMSNormConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(m, args=(x,)).run_decompositions(
+                get_decomp_table()
+            ),
+            externalize_modules=[TestTorchRMSNormConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x)
@@ -543,11 +529,14 @@ class TestTorchRMSNormConversion:
             x=x,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.ir
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    def test_rms_norm_n_heads_ir(dynamic: bool, dtype: torch.dtype) -> None:
+    def test_rms_norm_n_heads_ir(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Test rms_norm with n_heads for fused query & key normalization IR."""
 
         class WrapperModel(torch.nn.Module):
@@ -567,19 +556,12 @@ class TestTorchRMSNormConversion:
             batch_dim = torch.export.Dim("batch_size", min=1, max=32)
             seq_dim = torch.export.Dim("seq_len", min=1, max=64)
             export_dynamic_shapes = {"x": {0: batch_dim, 2: seq_dim}}
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchRMSNormConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x,), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRMSNormConversion._make_externalize_spec()],
         )
 
         b = "?" if dynamic else 2
@@ -602,10 +584,13 @@ class TestTorchRMSNormConversion:
             check_file=truth,
         )
 
+    @pytest.mark.parametrize(
+        "convert", [convert_via_module, convert_via_markers], ids=["module", "markers"]
+    )
     @pytest.mark.parametrize("dynamic", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @staticmethod
-    async def test_rms_norm_n_heads(dynamic: bool, dtype: torch.dtype) -> None:
+    async def test_rms_norm_n_heads(dynamic: bool, dtype: torch.dtype, convert) -> None:
         """Test rms_norm with n_heads for fused query & key normalization."""
 
         class WrapperModel(torch.nn.Module):
@@ -625,19 +610,12 @@ class TestTorchRMSNormConversion:
             batch_dim = torch.export.Dim("batch_size", min=1, max=32)
             seq_dim = torch.export.Dim("seq_len", min=1, max=64)
             export_dynamic_shapes = {"x": {0: batch_dim, 2: seq_dim}}
-
-        converted_program = (
-            TorchConverter()
-            .add_pytorch_module(
-                model,
-                export_fn=lambda m: torch.export.export(
-                    m, args=(x,), dynamic_shapes=export_dynamic_shapes
-                ).run_decompositions(get_decomp_table()),
-                externalize_modules=[
-                    TestTorchRMSNormConversion._make_externalize_spec()
-                ],
-            )
-            .to_coreai()
+        converted_program = convert(
+            model,
+            export_fn=lambda m: torch.export.export(
+                m, args=(x,), dynamic_shapes=export_dynamic_shapes
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[TestTorchRMSNormConversion._make_externalize_spec()],
         )
 
         output_torch_eager = model(x)

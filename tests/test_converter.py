@@ -18,7 +18,7 @@ from torch import Tensor
 from torch.export import ExportedProgram
 
 import coreai_torch
-from coreai_torch import TorchConverter, get_decomp_table
+from coreai_torch import ExternalizeSpec, TorchConverter, get_decomp_table
 from coreai_torch._aten_to_core import (
     _aten_to_core_resolver,
     _higher_order_resolver,
@@ -789,6 +789,32 @@ class TestConverterReusability:
         r = repr(converter)
         assert "enc: ExportedProgram" in r
         assert "['img'] -> ['feat']" in r
+
+    def test_repr_shows_externalize_modules(self):
+        """repr() must read ExternalizeSpec.target_class, not the old .module_type."""
+
+        class _Norm(nn.Module):
+            def forward(self, x: Tensor) -> Tensor:
+                return x / x.norm()
+
+        class _Id(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = _Norm()
+
+            def forward(self, x: Tensor) -> Tensor:
+                return self.norm(x)
+
+        converter = TorchConverter()
+        converter.add_pytorch_module(
+            _Id(),
+            export_fn=lambda m: torch.export.export(
+                m, args=(torch.randn(2, 3),)
+            ).run_decompositions(get_decomp_table()),
+            externalize_modules=[ExternalizeSpec(_Norm)],
+        )
+        r = repr(converter)
+        assert "externalize=['_Norm']" in r
 
     def test_clear_by_entrypoint(self):
         converter = TorchConverter()
