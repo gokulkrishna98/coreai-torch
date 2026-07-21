@@ -1161,6 +1161,151 @@ class TestArgmaxIR:
         )
 
 
+class TestAtan2IR:
+    def test_static(self) -> None:
+        class Atan2Model(nn.Module):
+            def forward(self, y: Tensor, x: Tensor) -> Tensor:
+                return torch.atan2(y, x)
+
+        ir = get_ir(Atan2Model().eval(), y=torch.rand(2, 3), x=torch.rand(2, 3))
+        filecheck_pattern(
+            ir,
+            check_file="""
+                // CHECK-LABEL: module {
+                // CHECK-NEXT:   coreai.graph @main(%[[Y:.*]]: tensor<2x3xf32> {coreai.name = "y"}, %[[X:.*]]: tensor<2x3xf32> {coreai.name = "x"}) -> (tensor<2x3xf32> {coreai.name = "{{.*}}"}) attributes {__coreai_pure__} {
+                // CHECK:          %[[NEG_INF:.*]] = coreai.constant dense<0xFF800000> : tensor<f32>
+                // CHECK:          %[[POS_INF:.*]] = coreai.constant dense<0x7F800000> : tensor<f32>
+                // CHECK:          %[[NAN:.*]] = coreai.constant dense<0x7FC00000> : tensor<f32>
+                // CHECK:          %[[ZERO:.*]] = coreai.constant dense<0.000000e+00> : tensor<f32>
+                // CHECK:          %[[ONE:.*]] = coreai.constant dense<1.000000e+00> : tensor<f32>
+                // CHECK:          %[[PI:.*]] = coreai.constant dense<3.14159274> : tensor<f32>
+                // CHECK:          %[[NEG_PI:.*]] = coreai.constant dense<-3.14159274> : tensor<f32>
+                // CHECK:          %[[HPI:.*]] = coreai.constant dense<1.57079637> : tensor<f32>
+                // CHECK:          %[[NHPI:.*]] = coreai.constant dense<-1.57079637> : tensor<f32>
+                // CHECK:          %[[QPI:.*]] = coreai.constant dense<0.785398185> : tensor<f32>
+                // CHECK:          %[[NQPI:.*]] = coreai.constant dense<-0.785398185> : tensor<f32>
+                // CHECK:          %[[THREEQPI:.*]] = coreai.constant dense<2.3561945> : tensor<f32>
+                // CHECK:          %[[NTHREEQPI:.*]] = coreai.constant dense<-2.3561945> : tensor<f32>
+                // CHECK:          %[[Y_IS_ZERO:.*]] = coreai.decomposable.broadcasting_equal %[[Y]], %[[ZERO]]
+                // CHECK:          %[[X_IS_ZERO:.*]] = coreai.decomposable.broadcasting_equal %[[X]], %[[ZERO]]
+                // CHECK:          %[[Y_NEG_STRICT:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[Y]]
+                // CHECK:          %[[RECIP_Y:.*]] = coreai.decomposable.broadcasting_divide %[[ONE]], %[[Y]]
+                // CHECK:          %[[RECIP_Y_NEG:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[RECIP_Y]]
+                // CHECK:          %[[Y_ZERO_NEG:.*]] = coreai.decomposable.broadcasting_and %[[Y_IS_ZERO]], %[[RECIP_Y_NEG]]
+                // CHECK:          %[[Y_NEG:.*]] = coreai.decomposable.broadcasting_or %[[Y_NEG_STRICT]], %[[Y_ZERO_NEG]]
+                // CHECK:          %[[X_NEG_STRICT:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[X]]
+                // CHECK:          %[[RECIP_X:.*]] = coreai.decomposable.broadcasting_divide %[[ONE]], %[[X]]
+                // CHECK:          %[[RECIP_X_NEG:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[RECIP_X]]
+                // CHECK:          %[[X_ZERO_NEG:.*]] = coreai.decomposable.broadcasting_and %[[X_IS_ZERO]], %[[RECIP_X_NEG]]
+                // CHECK:          %[[X_NEG:.*]] = coreai.decomposable.broadcasting_or %[[X_NEG_STRICT]], %[[X_ZERO_NEG]]
+                // CHECK:          %[[Y_NOT_EQ_Y:.*]] = coreai.decomposable.broadcasting_not_equal %[[Y]], %[[Y]]
+                // CHECK:          %[[X_NOT_EQ_X:.*]] = coreai.decomposable.broadcasting_not_equal %[[X]], %[[X]]
+                // CHECK:          %[[ANY_NAN:.*]] = coreai.decomposable.broadcasting_or %[[Y_NOT_EQ_Y]], %[[X_NOT_EQ_X]]
+                // CHECK:          %[[X_IS_POS_INF:.*]] = coreai.decomposable.broadcasting_equal %[[X]], %[[POS_INF]]
+                // CHECK:          %[[X_IS_NEG_INF:.*]] = coreai.decomposable.broadcasting_equal %[[X]], %[[NEG_INF]]
+                // CHECK:          %[[X_IS_INF:.*]] = coreai.decomposable.broadcasting_or %[[X_IS_POS_INF]], %[[X_IS_NEG_INF]]
+                // CHECK:          %[[Y_IS_POS_INF:.*]] = coreai.decomposable.broadcasting_equal %[[Y]], %[[POS_INF]]
+                // CHECK:          %[[Y_IS_NEG_INF:.*]] = coreai.decomposable.broadcasting_equal %[[Y]], %[[NEG_INF]]
+                // CHECK:          %[[Y_IS_INF:.*]] = coreai.decomposable.broadcasting_or %[[Y_IS_POS_INF]], %[[Y_IS_NEG_INF]]
+                // CHECK:          %[[BOTH_INF:.*]] = coreai.decomposable.broadcasting_and %[[X_IS_INF]], %[[Y_IS_INF]]
+                // CHECK:          %[[BASE:.*]] = coreai.atan
+                // CHECK:          %[[INF_RESULT:.*]] = coreai.decomposable.broadcasting_where %[[BOTH_INF]],
+                // CHECK:          %[[RESULT:.*]] = coreai.decomposable.broadcasting_where %[[ANY_NAN]], %[[NAN]], %[[INF_RESULT]]
+                // CHECK-NEXT:     coreai.output %[[RESULT]] : tensor<2x3xf32>
+                // CHECK-NEXT:   }
+                // CHECK-NEXT: }
+            """,
+        )
+
+    def test_dynamic(self) -> None:
+        class Atan2Model(nn.Module):
+            def forward(self, y: Tensor, x: Tensor) -> Tensor:
+                return torch.atan2(y, x)
+
+        y = torch.rand(2, 3)
+        x = torch.rand(2, 3)
+        ir = get_ir(
+            Atan2Model().eval(),
+            y=y,
+            x=x,
+            dynamic_shapes={"y": _all_dims_dynamic(y), "x": _all_dims_dynamic(x)},
+        )
+        filecheck_pattern(
+            ir,
+            check_file="""
+                // CHECK-LABEL: module {
+                // CHECK-NEXT:   coreai.graph @main(%[[Y:.*]]: tensor<?x?xf32> {coreai.name = "y"}, %[[X:.*]]: tensor<?x?xf32> {coreai.name = "x"}) -> (tensor<?x?xf32> {coreai.name = "{{.*}}"}) attributes {__coreai_pure__} {
+                // CHECK:          %[[NEG_INF:.*]] = coreai.constant dense<0xFF800000> : tensor<f32>
+                // CHECK:          %[[POS_INF:.*]] = coreai.constant dense<0x7F800000> : tensor<f32>
+                // CHECK:          %[[NAN:.*]] = coreai.constant dense<0x7FC00000> : tensor<f32>
+                // CHECK:          %[[ZERO:.*]] = coreai.constant dense<0.000000e+00> : tensor<f32>
+                // CHECK:          %[[ONE:.*]] = coreai.constant dense<1.000000e+00> : tensor<f32>
+                // CHECK:          %[[PI:.*]] = coreai.constant dense<3.14159274> : tensor<f32>
+                // CHECK:          %[[NEG_PI:.*]] = coreai.constant dense<-3.14159274> : tensor<f32>
+                // CHECK:          %[[HPI:.*]] = coreai.constant dense<1.57079637> : tensor<f32>
+                // CHECK:          %[[NHPI:.*]] = coreai.constant dense<-1.57079637> : tensor<f32>
+                // CHECK:          %[[QPI:.*]] = coreai.constant dense<0.785398185> : tensor<f32>
+                // CHECK:          %[[NQPI:.*]] = coreai.constant dense<-0.785398185> : tensor<f32>
+                // CHECK:          %[[THREEQPI:.*]] = coreai.constant dense<2.3561945> : tensor<f32>
+                // CHECK:          %[[NTHREEQPI:.*]] = coreai.constant dense<-2.3561945> : tensor<f32>
+                // CHECK:          %[[Y_IS_ZERO:.*]] = coreai.decomposable.broadcasting_equal %[[Y]], %[[ZERO]]
+                // CHECK:          %[[X_IS_ZERO:.*]] = coreai.decomposable.broadcasting_equal %[[X]], %[[ZERO]]
+                // CHECK:          %[[Y_NEG_STRICT:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[Y]]
+                // CHECK:          %[[RECIP_Y:.*]] = coreai.decomposable.broadcasting_divide %[[ONE]], %[[Y]]
+                // CHECK:          %[[RECIP_Y_NEG:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[RECIP_Y]]
+                // CHECK:          %[[Y_ZERO_NEG:.*]] = coreai.decomposable.broadcasting_and %[[Y_IS_ZERO]], %[[RECIP_Y_NEG]]
+                // CHECK:          %[[Y_NEG:.*]] = coreai.decomposable.broadcasting_or %[[Y_NEG_STRICT]], %[[Y_ZERO_NEG]]
+                // CHECK:          %[[X_NEG_STRICT:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[X]]
+                // CHECK:          %[[RECIP_X:.*]] = coreai.decomposable.broadcasting_divide %[[ONE]], %[[X]]
+                // CHECK:          %[[RECIP_X_NEG:.*]] = coreai.decomposable.broadcasting_greater %[[ZERO]], %[[RECIP_X]]
+                // CHECK:          %[[X_ZERO_NEG:.*]] = coreai.decomposable.broadcasting_and %[[X_IS_ZERO]], %[[RECIP_X_NEG]]
+                // CHECK:          %[[X_NEG:.*]] = coreai.decomposable.broadcasting_or %[[X_NEG_STRICT]], %[[X_ZERO_NEG]]
+                // CHECK:          %[[Y_NOT_EQ_Y:.*]] = coreai.decomposable.broadcasting_not_equal %[[Y]], %[[Y]]
+                // CHECK:          %[[X_NOT_EQ_X:.*]] = coreai.decomposable.broadcasting_not_equal %[[X]], %[[X]]
+                // CHECK:          %[[ANY_NAN:.*]] = coreai.decomposable.broadcasting_or %[[Y_NOT_EQ_Y]], %[[X_NOT_EQ_X]]
+                // CHECK:          %[[X_IS_POS_INF:.*]] = coreai.decomposable.broadcasting_equal %[[X]], %[[POS_INF]]
+                // CHECK:          %[[X_IS_NEG_INF:.*]] = coreai.decomposable.broadcasting_equal %[[X]], %[[NEG_INF]]
+                // CHECK:          %[[X_IS_INF:.*]] = coreai.decomposable.broadcasting_or %[[X_IS_POS_INF]], %[[X_IS_NEG_INF]]
+                // CHECK:          %[[Y_IS_POS_INF:.*]] = coreai.decomposable.broadcasting_equal %[[Y]], %[[POS_INF]]
+                // CHECK:          %[[Y_IS_NEG_INF:.*]] = coreai.decomposable.broadcasting_equal %[[Y]], %[[NEG_INF]]
+                // CHECK:          %[[Y_IS_INF:.*]] = coreai.decomposable.broadcasting_or %[[Y_IS_POS_INF]], %[[Y_IS_NEG_INF]]
+                // CHECK:          %[[BOTH_INF:.*]] = coreai.decomposable.broadcasting_and %[[X_IS_INF]], %[[Y_IS_INF]]
+                // CHECK:          %[[BASE:.*]] = coreai.atan
+                // CHECK:          %[[INF_RESULT:.*]] = coreai.decomposable.broadcasting_where %[[BOTH_INF]],
+                // CHECK:          %[[RESULT:.*]] = coreai.decomposable.broadcasting_where %[[ANY_NAN]], %[[NAN]], %[[INF_RESULT]]
+                // CHECK-NEXT:     coreai.output %[[RESULT]] : tensor<?x?xf32>
+                // CHECK-NEXT:   }
+                // CHECK-NEXT: }
+            """,
+        )
+
+    def test_1d(self) -> None:
+        class Atan2Model(nn.Module):
+            def forward(self, y: Tensor, x: Tensor) -> Tensor:
+                return torch.atan2(y, x)
+
+        ir = get_ir(Atan2Model().eval(), y=torch.rand(4), x=torch.rand(4))
+        filecheck_pattern(
+            ir,
+            check_file="""
+                // CHECK-LABEL: module {
+                // CHECK-NEXT:   coreai.graph @main(%[[Y:.*]]: tensor<4xf32> {coreai.name = "y"}, %[[X:.*]]: tensor<4xf32> {coreai.name = "x"}) -> (tensor<4xf32> {coreai.name = "{{.*}}"}) attributes {__coreai_pure__} {
+                // CHECK:          %[[ZERO:.*]] = coreai.constant dense<0.000000e+00> : tensor<f32>
+                // CHECK:          %[[ONE:.*]] = coreai.constant dense<1.000000e+00> : tensor<f32>
+                // CHECK:          %[[Y_NEG:.*]] = coreai.decomposable.broadcasting_or
+                // CHECK:          %[[X_NEG:.*]] = coreai.decomposable.broadcasting_or
+                // CHECK:          %[[ANY_NAN:.*]] = coreai.decomposable.broadcasting_or
+                // CHECK:          %[[BOTH_INF:.*]] = coreai.decomposable.broadcasting_and
+                // CHECK:          %[[BASE:.*]] = coreai.atan
+                // CHECK:          %[[INF_RESULT:.*]] = coreai.decomposable.broadcasting_where %[[BOTH_INF]],
+                // CHECK:          %[[RESULT:.*]] = coreai.decomposable.broadcasting_where %[[ANY_NAN]],
+                // CHECK-NEXT:     coreai.output %[[RESULT]] : tensor<4xf32>
+                // CHECK-NEXT:   }
+                // CHECK-NEXT: }
+            """,
+        )
+
+
 class TestAvgPool2dIR:
     def test_static(self) -> None:
         class AvgPool2dModel(nn.Module):
@@ -2469,17 +2614,12 @@ class TestConvolutionIR:
             check_file="""
                 // CHECK-LABEL: module {
                 // CHECK-NEXT:   coreai.graph @main(%[[ARG0:.*]]: tensor<1x3x4x4xf32> {coreai.name = "x"}) -> (tensor<1x8x8x8xf32> {coreai.name = "{{.*}}"}) attributes {__coreai_pure__} {
-                // CHECK-NEXT:     %[[V0:.*]] = coreai.constant dense<[1, 8, 9, 9]> : tensor<4xsi32>
-                // CHECK-NEXT:     %[[V1:.*]] = coreai.constant dense<1> : tensor<4xsi32>
-                // CHECK-NEXT:     %[[V2:.*]] = coreai.constant dense<[0, 0, 1, 1]> : tensor<4xsi32>
-                // CHECK-NEXT:     %[[V3:.*]] = coreai.constant dense<{{.*}}> : tensor<3x8x3x3xf32>
-                // CHECK-NEXT:     %[[V4:.*]] = coreai.constant dense<2> : tensor<2xui32>
-                // CHECK-NEXT:     %[[V5:.*]] = coreai.constant dense<0> : tensor<2xui32>
-                // CHECK-NEXT:     %[[V6:.*]] = coreai.constant dense<1> : tensor<2xui32>
-                // CHECK-NEXT:     %[[V7:.*]] = coreai.constant dense<1> : tensor<ui32>
-                // CHECK-NEXT:     %[[V8:.*]] = coreai.conv_transpose2d %[[ARG0]], %[[V3]], %[[V4]], %[[V5]], %[[V6]], %[[V5]], %[[V7]] : (tensor<1x3x4x4xf32>, tensor<3x8x3x3xf32>, tensor<2xui32>, tensor<2xui32>, tensor<2xui32>, tensor<2xui32>, tensor<ui32>) -> tensor<1x8x9x9xf32>
-                // CHECK-NEXT:     %[[V9:.*]] = coreai.slice %[[V8]], %[[V2]], %[[V0]], %[[V1]] : (tensor<1x8x9x9xf32>, tensor<4xsi32>, tensor<4xsi32>, tensor<4xsi32>) -> tensor<1x8x8x8xf32>
-                // CHECK-NEXT:     coreai.output %[[V9]] : tensor<1x8x8x8xf32>
+                // CHECK-NEXT:     %[[W:.*]] = coreai.constant dense<{{.*}}> : tensor<3x8x3x3xf32>
+                // CHECK-NEXT:     %[[STRIDE:.*]] = coreai.constant dense<2> : tensor<2xui32>
+                // CHECK-NEXT:     %[[ONE:.*]] = coreai.constant dense<1> : tensor<2xui32>
+                // CHECK-NEXT:     %[[GROUPS:.*]] = coreai.constant dense<1> : tensor<ui32>
+                // CHECK-NEXT:     %[[R:.*]] = coreai.conv_transpose2d %[[ARG0]], %[[W]], %[[STRIDE]], %[[ONE]], %[[ONE]], %[[ONE]], %[[GROUPS]] : (tensor<1x3x4x4xf32>, tensor<3x8x3x3xf32>, tensor<2xui32>, tensor<2xui32>, tensor<2xui32>, tensor<2xui32>, tensor<ui32>) -> tensor<1x8x8x8xf32>
+                // CHECK-NEXT:     coreai.output %[[R]] : tensor<1x8x8x8xf32>
                 // CHECK-NEXT:   }
                 // CHECK-NEXT: }
             """,

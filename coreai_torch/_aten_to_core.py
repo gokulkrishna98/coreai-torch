@@ -1153,7 +1153,8 @@ def _conv_transpose(
     """Handles transposed convolution (conv_transpose1d and conv_transpose2d).
 
     For 1D, expands to 2D, performs conv_transpose2d, then shrinks back.
-    Handles output_padding via pre-padding input and post-cropping output.
+    ``padding`` and ``output_padding`` are handled natively by the Core AI
+    ``conv_transpose2d`` op (matching PyTorch semantics).
     """
     is_1d = x.type.rank == 3
     if is_1d:
@@ -1165,66 +1166,29 @@ def _conv_transpose(
         dilation = dilation + [1]
         output_padding = output_padding + [0]
 
-    x_rank = x.type.rank
-    effective_padding = padding
-    pre_pad_amt = [0] * (x_rank * 2)
-    post_crop_amt = [0] * (x_rank * 2)
-
-    if any(p > 0 for p in output_padding):
-        effective_padding = [0] * len(padding)
-        pre_pad_amt = [0] * (x_rank * 2)
-        post_crop_amt = [0] * (x_rank * 2)
-        # For each spatial dim: initialize symmetric crop from padding,
-        # then shift the output_padding amount from crop → pre-pad if needed
-        for i, (p, op) in enumerate(zip(padding, output_padding)):
-            before = 4 + 2 * i
-            after = 4 + 2 * i + 1
-            post_crop_amt[before] = p
-            post_crop_amt[after] = p
-            if post_crop_amt[after] >= op:
-                post_crop_amt[after] -= op
-            else:
-                pre_pad_amt[after] = op - post_crop_amt[after]
-                post_crop_amt[after] = 0
-
-    if any(p > 0 for p in pre_pad_amt):
-        x = coreai.pad(
-            x,
-            np.array(pre_pad_amt, dtype=np.uint32),
-            coreai.constant(0, dtype=x.type.element_type),
-        )
-    stride = coreai.constant(stride, np.uint32)
-    effective_padding = coreai.constant(effective_padding, np.uint32)
-    dilation = coreai.constant(dilation, np.uint32)
-    output_padding = coreai.constant([0, 0], dtype=np.uint32)
-    groups = coreai.constant(groups, np.uint32)
     result = coreai.conv_transpose2d(
         input=x,
         weight=weight,
-        stride=stride,
-        padding=effective_padding,
-        dilation=dilation,
-        output_pad=output_padding,
-        groups=groups,
+        stride=coreai.constant(stride, np.uint32),
+        padding=coreai.constant(padding, np.uint32),
+        dilation=coreai.constant(dilation, np.uint32),
+        output_pad=coreai.constant(output_padding, np.uint32),
+        groups=coreai.constant(groups, np.uint32),
     )
 
-    if any(p > 0 for p in post_crop_amt):
-        stop_val = coreai.sub(
-            coreai.cast(coreai.get_shape(result), dtype=np.int32),
-            [post_crop_amt[2 * d + 1] for d in range(x_rank)],
-        )
-        result = coreai.slice_(
-            result,
-            [post_crop_amt[2 * d] for d in range(x_rank)],
-            stop_val,
-            [1] * x_rank,
-        )
-
     if is_1d:
-        # Shrink back to 3D: [N,C,W,1] → [N,C,W]
-        result = coreai.reshape(
-            result, coreai.slice_(coreai.get_shape(result), [0], [3], [1])
-        )
+        # Shrink back to 3D: [N,C,W,1] → [N,C,W]. When the trailing (added) dim
+        # is statically 1, use shrink_dims — the inverse of the expand_dims
+        # above — which preserves the statically-known output shape so
+        # downstream ops (e.g. squeeze) stay static (rdar://181169322). Under a
+        # dynamic input the conv op reports every dim (incl. the added one) as
+        # dynamic, so fall back to a reshape driven by the runtime shape.
+        if result.type.shape[-1] == 1:
+            result = coreai.shrink_dims(result, [-1])
+        else:
+            result = coreai.reshape(
+                result, coreai.slice_(coreai.get_shape(result), [0], [3], [1])
+            )
 
     if bias is not None:
         bias_shape = (
@@ -1550,6 +1514,124 @@ def replace_argmax(values_map: dict[str, Value], node: fx.Node, loc: Location) -
     dim = dim + x.type.rank if dim < 0 else dim
     result = coreai.cast(coreai.argmax(x, dim), np.int32)
     return result if keepdim else coreai.shrink_dims(result, [dim])
+
+
+def replace_atan2(values_map: dict[str, Value], node: fx.Node, loc: Location) -> Value:
+    """Lower atan2(y, x) using atan(y/x) with quadrant correction.
+
+    CoreAI has no native atan2, so it is decomposed as:
+      - x != 0, finite: atan(y/x) adjusted by ±π for the correct quadrant.
+      - x == +0: ±π/2 for non-zero y, 0 for y = 0.
+      - x == -0: ±π for all y (including ±0 → ±π per IEEE-754).
+      - both infinite: ±π/4 or ±3π/4 per IEEE-754.
+      - either operand is NaN: NaN, checked last so it overrides every other
+        branch (comparisons against NaN are all False, which would otherwise
+        misclassify NaN as one of the zero/quadrant cases above).
+
+    Signed-zero handling: IEEE-754 treats -0.0 as distinct from +0.0 for atan2
+    (e.g. atan2(-0, -1) = -π, not +π). The 1/v trick — 1/-0.0 = -inf — is used
+    to detect the sign bit of zero inputs so that y_neg and x_neg are correct
+    for -0.0 inputs without misclassifying ±inf (which use the strict > path).
+
+    When x=0, x is replaced with 1 before the divide solely to avoid NaN/inf; that
+    intermediate result is discarded by the final where-select.
+    atan2(0, 0) = 0 by convention.
+    """
+    y, x = _get_operands(values_map, node, [0, 1])
+    ele_type = x.type.element_type
+
+    zero = coreai.constant(0.0, dtype=ele_type)
+    one = coreai.constant(1.0, dtype=ele_type)
+    pi = coreai.constant(np.pi, dtype=ele_type)
+    neg_pi = coreai.constant(-np.pi, dtype=ele_type)
+    half_pi = coreai.constant(np.pi / 2.0, dtype=ele_type)
+    neg_half_pi = coreai.constant(-np.pi / 2.0, dtype=ele_type)
+    quarter_pi = coreai.constant(np.pi / 4.0, dtype=ele_type)
+    neg_quarter_pi = coreai.constant(-np.pi / 4.0, dtype=ele_type)
+    three_quarter_pi = coreai.constant(3.0 * np.pi / 4.0, dtype=ele_type)
+    neg_three_quarter_pi = coreai.constant(-3.0 * np.pi / 4.0, dtype=ele_type)
+
+    # ── signed-zero-aware sign predicates ─────────────────────────────────────
+    # 1 / -0.0 = -inf (IEEE-754), so (0 > 1/v) is True iff v = -0.0. Combine with
+    # the strict > predicate (handles ±inf and non-zero finites) via OR.
+    y_is_zero = coreai.broadcasting_equal(y, zero)
+    x_is_zero = coreai.broadcasting_equal(x, zero)
+    y_neg = coreai.broadcasting_or(
+        coreai.broadcasting_greater(zero, y),
+        coreai.broadcasting_and(
+            y_is_zero,
+            coreai.broadcasting_greater(zero, coreai.broadcasting_divide(one, y)),
+        ),
+    )
+    x_neg = coreai.broadcasting_or(
+        coreai.broadcasting_greater(zero, x),
+        coreai.broadcasting_and(
+            x_is_zero,
+            coreai.broadcasting_greater(zero, coreai.broadcasting_divide(one, x)),
+        ),
+    )
+    x_is_neg_zero = coreai.broadcasting_and(
+        x_is_zero,
+        coreai.broadcasting_greater(zero, coreai.broadcasting_divide(one, x)),
+    )
+
+    # ── NaN branch ─────────────────────────────────────────────────────────────
+    # NaN != NaN under IEEE-754, so this is a self-contained NaN check. Needed
+    # because the x=0 branch below classifies purely on comparisons, which are
+    # all False for NaN and would otherwise misclassify atan2(NaN, ±0).
+    any_nan = coreai.broadcasting_or(
+        coreai.broadcasting_not_equal(y, y), coreai.broadcasting_not_equal(x, x)
+    )
+    nan_result = coreai.constant(float("nan"), dtype=ele_type)
+
+    # ── both-infinite branch ──────────────────────────────────────────────────
+    # atan(inf/inf) = atan(NaN) = NaN; handle before the divide.
+    pos_inf = coreai.constant(float("inf"), dtype=ele_type)
+    neg_inf = coreai.constant(float("-inf"), dtype=ele_type)
+    x_is_inf = coreai.broadcasting_or(
+        coreai.broadcasting_equal(x, pos_inf), coreai.broadcasting_equal(x, neg_inf)
+    )
+    y_is_inf = coreai.broadcasting_or(
+        coreai.broadcasting_equal(y, pos_inf), coreai.broadcasting_equal(y, neg_inf)
+    )
+    both_inf = coreai.broadcasting_and(x_is_inf, y_is_inf)
+    inf_result = coreai.broadcasting_where(
+        y_neg,
+        coreai.broadcasting_where(x_neg, neg_three_quarter_pi, neg_quarter_pi),
+        coreai.broadcasting_where(x_neg, three_quarter_pi, quarter_pi),
+    )
+
+    # ── x = 0 branch ──────────────────────────────────────────────────────────
+    # x = +0: ±π/2 for strictly ±y, 0 when y = 0.
+    # x = -0: ±π for all y (y_neg covers y = -0.0 via the 1/y trick above).
+    y_pos_strict = coreai.broadcasting_greater(y, zero)
+    y_neg_strict = coreai.broadcasting_greater(zero, y)
+    pos_x_zero_result = coreai.broadcasting_where(
+        y_pos_strict,
+        half_pi,
+        coreai.broadcasting_where(y_neg_strict, neg_half_pi, zero),
+    )
+    neg_x_zero_result = coreai.broadcasting_where(y_neg, neg_pi, pi)
+    zero_result = coreai.broadcasting_where(
+        x_is_neg_zero, neg_x_zero_result, pos_x_zero_result
+    )
+
+    # ── finite nonzero x branch ────────────────────────────────────────────────
+    # Avoid division by zero: substitute x = 1 when x = 0; result discarded by
+    # the outer where-select.
+    x_safe = coreai.broadcasting_where(x_is_zero, one, x)
+    base = coreai.atan(coreai.broadcasting_divide(y, x_safe))
+    correction = coreai.broadcasting_where(
+        y_neg,
+        coreai.broadcasting_sub(base, pi),
+        coreai.broadcasting_add(base, pi),
+    )
+    nonzero_result = coreai.broadcasting_where(x_neg, correction, base)
+
+    # ── combine ────────────────────────────────────────────────────────────────
+    result = coreai.broadcasting_where(x_is_zero, zero_result, nonzero_result)
+    result = coreai.broadcasting_where(both_inf, inf_result, result)
+    return coreai.broadcasting_where(any_nan, nan_result, result)
 
 
 def replace_gather(values_map: dict[str, Value], node: fx.Node, loc: Location) -> Value:
@@ -2114,11 +2196,11 @@ def replace_maxpool2d_with_indices(
     x = _get_operand(values_map, node, 0)
     args = node.args
     kernel_size = args[1]
-    if isinstance(args[2], fx.Node):
+    if len(args) > 2 and isinstance(args[2], fx.Node):
         raise ValueError(
             f"Encountered dynamic stride at maxpool2d: node: {node}, name: {node.name}"
         )
-    stride = args[2]
+    stride = args[2] if len(args) >= 3 else kernel_size
     padding = args[3] if len(args) >= 4 else [0, 0]
     dilation = args[4] if len(args) >= 5 else [1, 1]
     ceil_mode = args[5] if len(args) >= 6 else False
@@ -2170,6 +2252,9 @@ def replace_mean_default(
 ) -> Value:
     """Computes global mean across all dimensions, returning a scalar tensor."""
     x = _get_operand(values_map, node, 0)
+    target_type = get_output_element_type_from_node(node)
+    if x.type.element_type != target_type:
+        x = coreai.cast(x, target_type)
     all_dims = list(range(x.type.rank))
     return coreai.shrink_dims(coreai.reduce_mean(x, all_dims), all_dims)
 
@@ -2179,6 +2264,9 @@ def replace_mean_dim(
 ) -> Value:
     """Computes mean along specified dimensions."""
     x, axes = _get_operands(values_map, node, [0, 1])
+    target_type = get_output_element_type_from_node(node)
+    if x.type.element_type != target_type:
+        x = coreai.cast(x, target_type)
     keepdim = len(node.args) >= 3 and bool(node.args[2])
     result = coreai.reduce_mean(x, axes)
     return result if keepdim else coreai.shrink_dims(result, axes)
@@ -2234,11 +2322,22 @@ def replace_min_dim(
     dim = dim + x.type.rank if dim < 0 else dim
 
     min_values = coreai.reduce_min(x, [dim])
+
+    element_type = x.type.element_type
+    is_integer = isinstance(element_type, IntegerType)
+    is_bool = element_type == IntegerType.get_signless(1)
+    if is_integer and not is_bool:
+        # ~x == x ^ ALL_ONES; -1 has all bits set in two's complement. Bitwise
+        # complement is a strictly order-reversing bijection over the whole
+        # integer range (no overflow), so argmax(~x) == argmin(x).
+        reversed_x = coreai.broadcasting_bitwise_xor(
+            x, coreai.constant(-1, dtype=element_type)
+        )
+    else:
+        reversed_x = coreai.broadcasting_mul(x, coreai.constant(-1, dtype=element_type))
+
     argmin_indices = coreai.cast(
-        coreai.argmax(
-            coreai.broadcasting_mul(x, coreai.constant(-1, dtype=x.type.element_type)),
-            dim,
-        ),
+        coreai.argmax(reversed_x, dim),
         np.int32,
     )
 
@@ -3470,6 +3569,7 @@ _aten_to_core_resolver: dict[str, Callable[..., Any]] = {
     "asin.default": replace_unary_ops,
     "asinh.default": replace_unary_ops,
     "atan.default": replace_unary_ops,
+    "atan2.default": replace_atan2,
     "atanh.default": replace_unary_ops,
     "_adaptive_avg_pool2d.default": replace_adaptive_avg_pool2d,
     "_unsafe_view.default": replace_view,

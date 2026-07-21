@@ -411,6 +411,30 @@ class TestQuantize:
             prepare_program=inject_subbyte_tensors,
         )
 
+    # (2, 4, 4): equal dims keep a wrong axis silent (a value mismatch).
+    # (2, 3, 4): distinct dims show -1 is the last dim (a wrong axis is a reshape error).
+    @pytest.mark.parametrize("x", [torch.randn(2, 4, 4), torch.randn(2, 3, 4)])
+    async def test_per_channel_negative_axis_numerical(self, x: Tensor) -> None:
+        """quantize with a per-channel scale on a negative axis matches eager."""
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.register_buffer(
+                    "scale", torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float32)
+                )
+                self.register_buffer("zero_point", torch.zeros(4, dtype=torch.int8))
+
+            def forward(self, x: Tensor) -> Tensor:
+                return torch.ops.coreai.quantize(
+                    x, self.scale, torch.int8, zero_point=self.zero_point, axis=-1
+                )
+
+        model = Model()
+        await validate_numerical_output(
+            model=model, x=x, prepare_program=inject_subbyte_tensors
+        )
+
 
 # ---------------------------------------------------------------------------
 # dequantize → coreai.dequantize
@@ -538,6 +562,36 @@ class TestDequantize:
             x=x,
             dynamic_shapes=dynamic_shapes,
             prepare_program=inject_subbyte_tensors,
+        )
+
+    # (2, 4, 4): equal dims keep a wrong axis silent (a value mismatch).
+    # (2, 3, 4): distinct dims show -1 is the last dim (a wrong axis is a reshape error).
+    @pytest.mark.parametrize(
+        "x",
+        [
+            torch.randint(-128, 127, (2, 4, 4), dtype=torch.int8),
+            torch.randint(-128, 127, (2, 3, 4), dtype=torch.int8),
+        ],
+    )
+    async def test_per_channel_negative_axis_numerical(self, x: Tensor) -> None:
+        """dequantize with a per-channel scale on a negative axis matches eager."""
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.register_buffer(
+                    "scale", torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float32)
+                )
+                self.register_buffer("zero_point", torch.zeros(4, dtype=torch.int8))
+
+            def forward(self, x: Tensor) -> Tensor:
+                return torch.ops.coreai.dequantize(
+                    x, self.scale, zero_point=self.zero_point, axis=-1
+                )
+
+        model = Model()
+        await validate_numerical_output(
+            model=model, x=x, prepare_program=inject_subbyte_tensors
         )
 
 
