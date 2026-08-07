@@ -1490,7 +1490,10 @@ def _sdpa_decompose(
         coreai.cast(attn_weights, ele_type),
         coreai.cast(value, ele_type),
     )
-    assert result.type == query.type, "Result type and query type must be identical"
+    assert result.type.element_type == query.type.element_type, (
+        f"Result element type {result.type.element_type} must match "
+        f"query element type {query.type.element_type}"
+    )
     return result
 
 

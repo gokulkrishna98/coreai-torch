@@ -7636,6 +7636,30 @@ class TestSDPA:
             **kwargs,
         )
 
+    async def test_sdpa_gqa_unequal_v_head_dim(self) -> None:
+        """GQA where value's head dim differs from query/key's, as in MLA.
+
+        Output is [B, N_q, T_q, D_v], so its trailing dim comes from value and
+        does not match the query shape.
+        """
+
+        class SDPAModule(nn.Module):
+            def forward(self, query: Tensor, key: Tensor, value: Tensor) -> Tensor:
+                return nn.functional.scaled_dot_product_attention(
+                    query, key, value, enable_gqa=True
+                )
+
+        batch, num_heads, seq_q, seq_kv = 8, 4, 1, 36
+        qk_head_dim, v_head_dim = 32, 24
+
+        await validate_numerical_output(
+            model=SDPAModule().eval(),
+            query=torch.randn(batch, num_heads, seq_q, qk_head_dim),
+            key=torch.randn(batch, 1, seq_kv, qk_head_dim),
+            value=torch.randn(batch, 1, seq_kv, v_head_dim),
+            remove_decomps=[torch.ops.aten.scaled_dot_product_attention.default],
+        )
+
 
 # ndim (number of padded spatial dims) -> the aten op that must be preserved
 # so the reflect/replicate lowering (coreai.pad) is exercised end to end.

@@ -3525,24 +3525,12 @@ def replace_sdpa(values_map: dict[str, Value], node: fx.Node, loc: Location) -> 
         else sdpa_maskless(query, key, value)
     )[0]
 
-    # Restore original leading batch dims if inputs were rank > 4.
     if query_rank == 4:
-        assert result.type == original_query.type, (
-            "Result type and original query type must be identical"
-        )
         return result
     if query_rank == 3:
-        result = coreai.shrink_dims(result, [1])
-        assert result.type == original_query.type, (
-            "Result type and original query type must be identical"
-        )
-        return result
-    orig_shape = coreai.get_shape(original_query)
-    result = coreai.reshape(result, orig_shape)
-    assert result.type == original_query.type, (
-        "Result type and original query type must be identical"
-    )
-    return result
+        return coreai.shrink_dims(result, [1])
+    # Restore original leading batch dims if inputs were rank > 4.
+    return coreai.reshape(result, coreai.get_shape(original_query))
 
 
 _aten_to_core_resolver: dict[str, Callable[..., Any]] = {
