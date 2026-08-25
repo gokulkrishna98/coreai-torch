@@ -662,17 +662,13 @@ def test_externalize_composite_op_config_ir() -> None:
 
     check_file = """
         // CHECK-LABEL: module {
-        // CHECK:   coreai.graph private noinline @block.norm_{{[0-9a-f]+}}(
-        // CHECK-SAME: composite_decl = #coreai.composite_declaration<"rms_norm"
-        // CHECK:     coreai.output
-        // CHECK:   }
-        // CHECK:   coreai.graph private noinline @final_norm_{{[0-9a-f]+}}(
+        // CHECK:   coreai.graph private noinline @[[NORM:[a-zA-Z0-9_.]+]](
         // CHECK-SAME: composite_decl = #coreai.composite_declaration<"rms_norm"
         // CHECK:     coreai.output
         // CHECK:   }
         // CHECK:   coreai.graph @main(
-        // CHECK:     coreai.invoke @block.norm_{{[0-9a-f]+}}(
-        // CHECK:     coreai.invoke @final_norm_{{[0-9a-f]+}}(
+        // CHECK:     coreai.invoke @[[NORM]](
+        // CHECK:     coreai.invoke @[[NORM]](
         // CHECK:     coreai.output
         // CHECK:   }
         // CHECK: }

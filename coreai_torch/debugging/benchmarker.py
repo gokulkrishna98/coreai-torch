@@ -34,9 +34,13 @@ from coreai.authoring import AIProgram
 from coreai.runtime import AIModel, NDArray, Profiler, SpecializationOptions
 from typing_extensions import Self
 
-from .annotations import _ANNOTATION_STYLE, _write_line
+from .annotations import _Annotation, _TextAnnotation
 from .debug_info import DebugInfoRecord, parse_debug_infos
-from .source_annotator import _read_source_file, _should_exclude_location
+from .source_annotator import (
+    ModulePath,
+    _annotate_operations,
+    _operation_in_module,
+)
 from .utils import LocationInfo, get_operation_locations
 
 logger = logging.getLogger(__name__)
@@ -183,94 +187,6 @@ class Measurement:
             self.statistics is not None,
             self.statistics.median if self.statistics is not None else None,
         )
-
-
-def _group_operations_by_line(
-    module_timing: "ModuleTiming",
-    file_path: Path,
-) -> dict[int, list[tuple[Operation, "OperationTiming"]]]:
-    """
-    Group operations by line number for a specific file.
-
-    Args:
-        module_timing: ModuleTiming to get operations from
-        file_path: Path to match operations against
-
-    Returns:
-        Dictionary mapping line numbers to lists of (operation, timing) tuples
-
-    """
-    line_timings: dict[int, list[tuple[Operation, OperationTiming]]] = defaultdict(
-        list,
-    )
-
-    for operation, timing in module_timing.get_all_operations():
-        locations = get_operation_locations(operation)
-
-        for loc in locations:
-            # Match by filename (handle both absolute and relative paths)
-            if Path(loc.filename).name == file_path.name or loc.filename == str(
-                file_path,
-            ):
-                line_timings[loc.line].append((operation, timing))
-
-    return line_timings
-
-
-def _annotate_source_file(
-    module_timing: "ModuleTiming",
-    file_path: Path | str,
-    output: TextIO,
-) -> None:
-    """
-    Annotate a source file with timing information from a module.
-
-    Reads the source file, finds operations from that file in the module, and
-    writes the annotated source with a timing comment before each annotated line.
-
-    The comment is styled by name rather than by escape code, so colour is applied
-    for a terminal and dropped for a file or in-memory stream. Writing the escapes
-    unconditionally left them in the text of every saved listing, which a terminal
-    renders and an editor shows as noise.
-
-    Args:
-        module_timing: ModuleTiming to get operation timings from
-        file_path: Path to the source file to annotate
-        output: Text stream to write annotated source to (file or stdout)
-
-    """
-    file_path = Path(file_path)
-
-    # Read the source file
-    source_lines = _read_source_file(file_path, output)
-    if source_lines is None:
-        return
-
-    # Group operations by line number
-    line_timings = _group_operations_by_line(module_timing, file_path)
-
-    # Annotate and write source lines
-    for line_num, line_content in enumerate(source_lines, start=1):
-        # Write timing annotation BEFORE the source line if present
-        if line_num in line_timings:
-            # Collect timing info for this line
-            timings_for_line = []
-            for operation, timing in line_timings[line_num]:
-                if timing.measurement.statistics:
-                    stats = timing.measurement.statistics
-                    timings_for_line.append(
-                        f"{operation.name}: {stats.average:.3f}ms (med: {stats.median:.3f}ms)",
-                    )
-
-            if timings_for_line:
-                # Indent the comment to match the line it describes, so the
-                # annotated listing stays readable as Python.
-                margin = line_content[: len(line_content) - len(line_content.lstrip())]
-                annotation = margin + "# " + ", ".join(timings_for_line)
-                _write_line(output, annotation, _ANNOTATION_STYLE)
-
-        # Write the original source line
-        output.write(line_content)
 
 
 @dataclass
@@ -438,57 +354,6 @@ class ModuleTiming:
 
         return matching_ops
 
-    def annotate_dominant_source(
-        self: Self,
-        output: TextIO,
-        exclude: Callable[[LocationInfo], bool] | None = None,
-    ) -> None:
-        """
-        Find the dominant source file and annotate it with timing information.
-
-        Uses operations only from this module (not children). For each operation,
-        gets file/line/col locations, filters them, and takes the last valid file.
-        The dominant file is the one that appears most frequently.
-
-        Args:
-            output: Text stream to write annotated source to (file or stdout)
-            exclude: Optional callable to filter out locations. If None, uses default
-                    which excludes torch files, exported_program.py, and "-"
-
-        """
-        # Use default exclusion if not provided
-        if exclude is None:
-            exclude = _should_exclude_location
-
-        # Count occurrences of each source file from locations
-        file_counts: dict[str, int] = defaultdict(int)
-        # Only use operations from this module, not children
-        for operation, _ in self.operation_timings:
-            # Get file/line/col locations
-            locations = get_operation_locations(operation)
-
-            if locations:
-                # Take the last file (innermost)
-                last_loc = locations[-1]
-
-                # Check if it should be excluded
-                if not exclude(last_loc):
-                    last_file = last_loc.filename
-
-                    # Only count if file exists
-                    if Path(last_file).exists():
-                        file_counts[last_file] += 1
-
-        if not file_counts:
-            output.write("# No valid locations found in operations\n")
-            return
-
-        # Find the most common file (dominant)
-        dominant_file = max(file_counts.items(), key=lambda x: x[1])[0]
-
-        # Annotate the dominant file
-        _annotate_source_file(self, dominant_file, output)
-
     def write_to(
         self: Self,
         output: TextIO,
@@ -650,6 +515,59 @@ class BenchmarkResult:
 
         return root_modules
 
+    def annotate_source(
+        self: Self,
+        output: TextIO | None = None,
+        *,
+        module: ModulePath | None = None,
+        exclude: Callable[[LocationInfo], bool] | None = None,
+        annotate_all_files: bool = False,
+    ) -> None:
+        """
+        Annotate the program's source with each operation's timing information.
+
+        Walks the profiled operations and, for every operation with timing
+        statistics, writes its per-operation timing (average and median) as a
+        comment above the corresponding source line. By default only the single
+        dominant source file is annotated.
+
+        Args:
+            output: Text stream to write annotated source to. Defaults to
+                ``sys.stdout`` when None.
+            module: Optional module instance path (outermost first) to restrict
+                annotation to a single module subtree. When None (default), all
+                profiled operations are annotated.
+            exclude: Optional source-location filter. Defaults to excluding torch
+                files, ``exported_program.py``, and ``"-"``.
+            annotate_all_files: When True, annotate every attributed source file
+                (ordered by attribution count, descending). When False
+                (default), only the single dominant file is annotated.
+
+        """
+        # Map each operation to its timing so the callback can render statistics.
+        timing_by_op = {id(op): timing for op, timing in self.operation_timings}
+
+        def annotate(operation: Operation) -> _Annotation | None:
+            timing = timing_by_op.get(id(operation))
+            if timing is None or timing.measurement.statistics is None:
+                return None
+            stats = timing.measurement.statistics
+            return _TextAnnotation(
+                f"{operation.name}: {stats.average:.3f}ms (med: {stats.median:.3f}ms)",
+            )
+
+        operations = [op for op, _ in self.operation_timings]
+        if module is not None:
+            operations = [op for op in operations if _operation_in_module(op, module)]
+
+        _annotate_operations(
+            operations,
+            annotate,
+            output,
+            exclude=exclude,
+            annotate_all_files=annotate_all_files,
+        )
+
     def write_summary(
         self: Self,
         output: TextIO,
@@ -758,7 +676,7 @@ class Benchmarker(ABC):
                     self._coreai_operations[coreai_id] = op
             return WalkResult.ADVANCE
 
-        self.coreai_program._mlir_module.operation.walk(walk_operations)
+        self.coreai_program._module._mlir_module.operation.walk(walk_operations)
 
     def _build_odix_to_coreai_map(self: Self) -> None:
         """

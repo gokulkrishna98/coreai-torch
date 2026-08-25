@@ -88,7 +88,6 @@ class TestMutableBufferAnnotation:
             .add_exported_program(self._mutable_buffer_program())
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -117,7 +116,6 @@ class TestMutableBufferAnnotation:
             )
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -144,7 +142,7 @@ class TestMutableBufferAnnotation:
             str(result),
             check_file="""
                 // CHECK-LABEL: module {
-                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: tensor<2x3xf32> {coreai.name = "x"}, %{{.*}}: tensor<2x3xf32> {coreai.name = "y"}) -> (tensor<2x3xf32> {coreai.name = "add"}) {
+                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: tensor<2x3xf32> {coreai.name = "x"}, %{{.*}}: tensor<2x3xf32> {coreai.name = "y"}) -> (tensor<2x3xf32> {coreai.name = "add"}) attributes {__coreai_pure__} {
                 // CHECK-NOT: MutableBuffers.buffer_mutation
                 // CHECK:     coreai.decomposable.broadcasting_add
                 // CHECK:     coreai.output %{{.*}} : tensor<2x3xf32>
@@ -170,7 +168,6 @@ class TestMutableBufferAnnotation:
             _BufAdd().eval(), args=(torch.rand(2, 4),)
         ).run_decompositions()
         result = TorchConverter().add_exported_program(ep).to_coreai()
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -210,7 +207,6 @@ class TestMutableBufferAnnotation:
             )
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -226,13 +222,12 @@ class TestMutableBufferAnnotation:
 
     @pytest.mark.ir
     async def test_buffer_mutation_after_make_stateful(self) -> None:
-        """After make_stateful, buffer input becomes handle type and output becomes token."""
+        """to_coreai() converts buffer input to handle type and output to token type."""
         result = (
             TorchConverter()
             .add_exported_program(self._mutable_buffer_program())
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -281,7 +276,6 @@ class TestMutableUserInputAnnotation:
         result = (
             TorchConverter().add_exported_program(self._mutating_program()).to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -306,7 +300,6 @@ class TestMutableUserInputAnnotation:
             )
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -335,7 +328,7 @@ class TestMutableUserInputAnnotation:
             str(result),
             check_file="""
                 // CHECK-LABEL: module {
-                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: tensor<2x4xf32> {coreai.name = "x"}) -> (tensor<2x4xf32> {coreai.name = "mul"}) {
+                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: tensor<2x4xf32> {coreai.name = "x"}) -> (tensor<2x4xf32> {coreai.name = "mul"}) attributes {__coreai_pure__} {
                 // CHECK-NOT: MutableBuffers.buffer_mutation
                 // CHECK:     %{{.*}} = coreai.decomposable.broadcasting_mul %{{.*}}, %{{.*}} : (tensor<2x4xf32>, tensor<f32>) -> tensor<2x4xf32>
                 // CHECK:     coreai.output %{{.*}} : tensor<2x4xf32>
@@ -350,7 +343,6 @@ class TestMutableUserInputAnnotation:
         result = (
             TorchConverter().add_exported_program(self._mutating_program()).to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -380,7 +372,6 @@ class TestMutableUserInputAnnotation:
             )
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -396,11 +387,10 @@ class TestMutableUserInputAnnotation:
 
     @pytest.mark.ir
     async def test_user_input_mutation_after_make_stateful(self) -> None:
-        """After make_stateful, mutated user input becomes handle type and output becomes token."""
+        """to_coreai() converts mutated user input to handle type and output to token type."""
         result = (
             TorchConverter().add_exported_program(self._mutating_program()).to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -461,7 +451,6 @@ class TestMutableBufferAndUserInputAnnotation:
             .add_exported_program(self._both_mutations_program())
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -489,7 +478,6 @@ class TestMutableBufferAndUserInputAnnotation:
             )
             .to_coreai()
         )
-        result.optimize()
         ir = str(result)
         assert ir.count("MutableBuffers.buffer_mutation") == 2
         filecheck_pattern(
@@ -508,13 +496,12 @@ class TestMutableBufferAndUserInputAnnotation:
 
     @pytest.mark.ir
     async def test_both_mutations_after_make_stateful(self) -> None:
-        """After make_stateful, both mutated inputs become handles and outputs become tokens."""
+        """to_coreai() converts both mutated inputs to handles and outputs to tokens."""
         result = (
             TorchConverter()
             .add_exported_program(self._both_mutations_program())
             .to_coreai()
         )
-        result.optimize()
         filecheck_pattern(
             str(result),
             check_file="""
@@ -796,8 +783,8 @@ class TestStateNames:
             str(result),
             check_file="""
                 // CHECK-LABEL: module {
-                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: tensor<2x4xf32> {MutableBuffers.buffer_mutation = "kv_cache", coreai.name = "kv_cache"}, %{{.*}}: tensor<2x4xf32> {coreai.name = "my_x"}) -> (tensor<2x4xf32> {coreai.name = "kv_cache"}, tensor<2x4xf32> {coreai.name = "result"}) {
-                // CHECK:     coreai.output %{{.*}}, %{{.*}} : tensor<2x4xf32>, tensor<2x4xf32>
+                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: !coreai.handle<tensor<2x4xf32>> {MutableBuffers.buffer_mutation = "kv_cache", coreai.name = "kv_cache"}, %{{.*}}: tensor<2x4xf32> {coreai.name = "my_x"}) -> (!coreai.token {coreai.name = "kv_cache"}, tensor<2x4xf32> {coreai.name = "result"}) attributes {__coreai_pure__} {
+                // CHECK:     coreai.output %{{.*}}, %{{.*}} : !coreai.token, tensor<2x4xf32>
                 // CHECK:   }
                 // CHECK: }
             """,
@@ -830,8 +817,8 @@ class TestStateNames:
             str(result),
             check_file="""
                 // CHECK-LABEL: module {
-                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: tensor<2x4xf32> {MutableBuffers.buffer_mutation = "x_state", coreai.name = "x_state"}, %{{.*}}: tensor<2x4xf32> {coreai.name = "my_y"}) -> (tensor<2x4xf32> {coreai.name = "x_state"}, tensor<2x4xf32> {coreai.name = "result"}) {
-                // CHECK:     coreai.output %{{.*}}, %{{.*}} : tensor<2x4xf32>, tensor<2x4xf32>
+                // CHECK-NEXT:   coreai.graph @main(%{{.*}}: !coreai.handle<tensor<2x4xf32>> {MutableBuffers.buffer_mutation = "x_state", coreai.name = "x_state"}, %{{.*}}: tensor<2x4xf32> {coreai.name = "my_y"}) -> (!coreai.token {coreai.name = "x_state"}, tensor<2x4xf32> {coreai.name = "result"}) attributes {__coreai_pure__} {
+                // CHECK:     coreai.output %{{.*}}, %{{.*}} : !coreai.token, tensor<2x4xf32>
                 // CHECK:   }
                 // CHECK: }
             """,

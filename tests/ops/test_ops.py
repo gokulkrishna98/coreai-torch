@@ -2600,7 +2600,6 @@ class TestLayerNorm:
             model=model,
             x=x,
             dynamic_shapes=make_dynamic_shapes(x=dynamic_dims),
-            run_optimize_passes=True,
         )
 
 
@@ -3597,11 +3596,11 @@ class TestRepeat:
                 // CHECK-LABEL: coreai.graph @main
                 // CHECK-SAME:    %arg0: tensor<2x3xf32>
                 // CHECK-SAME:    %arg1: tensor<?x8xf32>
+                // CHECK:         %[[ONE:.+]] = coreai.constant dense<1> : tensor<1xui32>
                 // CHECK:         %[[SHAPE:.+]] = coreai.get_shape %arg1 : tensor<?x8xf32> -> tensor<2xui32>
                 // CHECK:         %[[SHAPE_SI32:.+]] = coreai.cast %[[SHAPE]] : tensor<2xui32> to tensor<2xsi32>
                 // CHECK:         %[[SLICE:.+]] = coreai.slice %[[SHAPE_SI32]]
                 // CHECK-SAME:      -> tensor<1xsi32>
-                // CHECK:         %[[ONE:.+]] = coreai.constant dense<1> : tensor<1xui32>
                 // CHECK:         %[[DIMS:.+]] = coreai.concat {{.*}}, %{{.+}}, %[[ONE]]
                 // CHECK-SAME:      -> tensor<2xui32>
                 // CHECK:         %[[OUT:.+]] = coreai.tile %arg0, %[[DIMS]]
@@ -3807,7 +3806,6 @@ class TestRound:
         self._rewrite_to_overload_packet(program)
 
         coreai_program = TorchConverter().add_exported_program(program).to_coreai()
-        coreai_program.optimize()
         # The bare ``aten.round`` target must reach ``coreai.round`` —
         # not produce a different op or fail with ``Unsupported ATen op``.
         # Shape and element type must pass through unchanged.
@@ -3882,7 +3880,6 @@ class TestView:
         # with the diagnostic ``expected the same element type for all
         # inputs to concat``.
         coreai_program = TorchConverter().add_exported_program(program).to_coreai()
-        coreai_program.optimize()
         # The fix's job is to normalise every entry of the view shape
         # ``[1, 1024, h, w]`` to the same canonical rank-1 si32 form
         # before the dim-vector concat. The check below pins:
@@ -4804,15 +4801,14 @@ class TestMaskedScatter:
                 // CHECK-SAME:    %arg0: tensor<2x3xf32>
                 // CHECK-SAME:    %arg1: tensor<2x3xi1>
                 // CHECK-SAME:    %arg2: tensor<6xf32>
-                // CHECK:         %[[SF:.+]] = coreai.reshape %arg0, %{{.+}} : (tensor<2x3xf32>, tensor<1xsi32>) -> tensor<6xf32>
-                // CHECK:         %[[MF:.+]] = coreai.reshape %arg1, %{{.+}} : (tensor<2x3xi1>, tensor<1xsi32>) -> tensor<6xi1>
-                // CHECK:         %[[VF:.+]] = coreai.reshape %arg2, %{{.+}} : (tensor<6xf32>, tensor<1xsi32>) -> tensor<6xf32>
+                // CHECK:         %[[SF:.+]] = coreai.reshape %arg0, %{{.+}} : (tensor<2x3xf32>, tensor<1xui32>) -> tensor<6xf32>
+                // CHECK:         %[[MF:.+]] = coreai.reshape %arg1, %{{.+}} : (tensor<2x3xi1>, tensor<1xui32>) -> tensor<6xi1>
                 // CHECK:         %[[MI:.+]] = coreai.cast %[[MF]] : tensor<6xi1> to tensor<6xsi32>
                 // CHECK:         %[[CS:.+]] = coreai.scan %[[MI]], %{{.+}}, %{{.+}} combiner = <sum> : (tensor<6xsi32>, tensor<ui32>, tensor<i1>) -> tensor<6xsi32>
                 // CHECK:         %[[IDX:.+]] = coreai.decomposable.broadcasting_sub %[[CS]], %{{.+}} : (tensor<6xsi32>, tensor<si32>) -> tensor<6xsi32>
-                // CHECK:         %[[G:.+]] = coreai.gather_along_axis %[[VF]] at %[[IDX]] along %{{.+}} : (tensor<6xf32>, tensor<6xsi32>, tensor<si32>) to tensor<6xf32>
+                // CHECK:         %[[G:.+]] = coreai.gather_along_axis %arg2 at %[[IDX]] along %{{.+}} : (tensor<6xf32>, tensor<6xsi32>, tensor<si32>) to tensor<6xf32>
                 // CHECK:         %[[W:.+]] = coreai.decomposable.broadcasting_where %[[MF]], %[[G]], %[[SF]] : (tensor<6xi1>, tensor<6xf32>, tensor<6xf32>) -> tensor<6xf32>
-                // CHECK:         %[[OUT:.+]] = coreai.reshape %[[W]], %{{.+}} : (tensor<6xf32>, tensor<2xsi32>) -> tensor<2x3xf32>
+                // CHECK:         %[[OUT:.+]] = coreai.reshape %[[W]], %{{.+}} : (tensor<6xf32>, tensor<2xui32>) -> tensor<2x3xf32>
                 // CHECK:         coreai.output %[[OUT]]
             """,
         )
@@ -4835,7 +4831,6 @@ class TestMaskedScatter:
             str(coreai_program),
             check_file="""
                 // CHECK-LABEL: coreai.graph @main
-                // CHECK:       coreai.reshape
                 // CHECK:       coreai.reshape
                 // CHECK:       coreai.reshape
                 // CHECK:       coreai.cast {{.+}} to tensor<{{.*}}xsi32>
@@ -6340,7 +6335,6 @@ class TestUpsampleNearest2d:
         # Convert must not raise. Pre-fix this raised ``ValueError:
         # Operation creation failed`` from ``coreai.concat``.
         coreai_program = TorchConverter().add_exported_program(program).to_coreai()
-        coreai_program.optimize()
         # The output_shape concat must take three rank-1 si32 operands —
         # the (N, C) slice from x's get_shape, plus normalised out_h and
         # out_w. Pre-fix, out_h/out_w arrived as rank-1 f32 (from
@@ -6513,7 +6507,6 @@ class TestUpsampleBilinear2d:
         # Convert must not raise. Pre-fix this raised ``ValueError:
         # Operation creation failed`` from ``coreai.concat``.
         coreai_program = TorchConverter().add_exported_program(program).to_coreai()
-        coreai_program.optimize()
         # Same shape concat as the nearest case; only the interpolation
         # mode tag differs. The fix is in the shape-build path so it
         # applies identically here.

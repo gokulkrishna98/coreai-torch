@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, TextIO
 
 import coreai._compiler._mlir_libs._coreaiIR._bindings.mlir as _mlir
@@ -32,6 +33,37 @@ from .table_writer import _Column, _Row, _TableSpec, _write_table
 # Stand-in filename for a location that carries only an operation id, with no real
 # source position behind it. Left out of a rendered summary.
 _OP_ID_PSEUDO_FILE = "op_id"
+
+
+class _Delegate(Enum):
+    """Enumerates the compute delegates an operation may be dispatched to."""
+
+    BNNS = "BNNS"
+    MPS = "MPS"
+    INTERPRETER = "INTERPRETER"
+    UNKNOWN = "UNKNOWN"
+
+    @classmethod
+    def from_string(cls, value: str) -> "_Delegate":
+        """Create a :class:`_Delegate` from its string representation.
+
+        Args:
+            value: The delegate identifier.
+
+        Returns:
+            The matching :class:`_Delegate` member, or
+            :attr:`_Delegate.UNKNOWN` if the string does not start with any
+            known delegate prefix.
+        """
+        delegate = value.lower()
+        if delegate.startswith("bnns"):
+            return cls.BNNS
+        elif delegate.startswith("mps"):
+            return cls.MPS
+        elif delegate.startswith("odix"):
+            return cls.INTERPRETER
+        else:
+            return cls.UNKNOWN
 
 
 @dataclass
@@ -291,22 +323,6 @@ class DebugInfo:
                 return m.value
         return None
 
-    def get_op_id(self, level: str) -> int | None:
-        """
-        Get the first operation ID for a given dialect level.
-
-        Args:
-        ----
-            level: Dialect level name (e.g., "torch", "coreai")
-
-        Returns:
-        -------
-            Operation ID if present, None otherwise
-
-        """
-        ids = self.get_op_ids(level)
-        return ids[0] if ids else None
-
     def get_op_ids(self, level: str) -> list[int]:
         """
         Get all operation IDs for a given dialect level.
@@ -325,6 +341,7 @@ class DebugInfo:
 
         """
         ids: list[int] = []
+        # Look for all metadata with key "op_id"
         for metadata in self.metadatas:
             if metadata.key != "op_id":
                 continue
@@ -344,6 +361,24 @@ class DebugInfo:
                 ids.append(value_field)
 
         return ids
+
+    def get_op_id(self, level: str) -> int | str | None:
+        """
+        Get operation ID for a given dialect level.
+
+        New format: metadata with key "op_id" containing dictionary {"type": "<dialect>", "value": <id>}
+
+        Args:
+        ----
+            level: Dialect level name (e.g., "torch", "coreai")
+
+        Returns:
+        -------
+            Operation ID if present, None otherwise
+
+        """
+        op_ids = self.get_op_ids(level=level)
+        return op_ids[0] if len(op_ids) > 0 else None
 
     def get_source(self) -> str | None:
         """Get source identifier if present."""
@@ -834,7 +869,7 @@ def _build_coreai_op_map(program: AIProgram) -> dict[int, "Operation"]:
             op_map[op_id.value] = operation
         return WalkResult.ADVANCE
 
-    program._mlir_module.operation.walk(_collect)
+    program._module._mlir_module.operation.walk(_collect)
     return op_map
 
 
@@ -847,7 +882,7 @@ def strip_debug_info(program: AIProgram) -> None:
     Args:
         program: The AIProgram to strip debug info from. Modified in place.
     """
-    module = program._mlir_module
+    module = program._module._mlir_module
     module_op = module.operation
     context = module_op.context
 

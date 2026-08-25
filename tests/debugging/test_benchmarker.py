@@ -149,7 +149,7 @@ async def test_module_timings(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Test only runs on macOS")
-async def test_annotate_dominant_source(
+async def test_annotate_source(
     hierarchical_coreai_program: AIProgram,
 ) -> None:
     """Test annotating dominant source file with timing information."""
@@ -163,13 +163,27 @@ async def test_annotate_dominant_source(
         num_runs=10,
     )
 
-    # Get module timings
-    root_module_timings = result.get_module_timings()["HierarchicalModel$1"]
+    result.annotate_source(sys.stdout, annotate_all_files=True)
 
-    # Iterate through all modules including children
-    for module in root_module_timings.get_all_modules():
-        sys.stdout.write(f"\n--- Module: {module.name} ---\n")
-        # Annotate dominant source to stdout
-        # This tests that the method works with terminal output and hierarchies
-        module.annotate_dominant_source(sys.stdout)
-        sys.stdout.write(2 * "\n")  # Add blank line between modules
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Test only runs on macOS")
+async def test_annotate_source_for_module(
+    hierarchical_coreai_program: AIProgram,
+) -> None:
+    """Test annotating source restricted to a single module subtree."""
+    example_inputs = get_example_inputs(HierarchicalModel)
+
+    # Run benchmark
+    result = await benchmark_coreai_program(
+        coreai_program=hierarchical_coreai_program,
+        inputs=example_inputs,
+        entry_point="main",
+        num_runs=10,
+    )
+
+    # Restrict annotation to the top-level module subtree.
+    sys.stdout.write("\n--- Module: HierarchicalModel$1 ---\n")
+    result.annotate_source(
+        sys.stdout, module=("HierarchicalModel$1",), annotate_all_files=True
+    )
+    sys.stdout.write(2 * "\n")

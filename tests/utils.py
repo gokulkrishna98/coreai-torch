@@ -13,10 +13,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+import ml_dtypes
 import numpy as np
 import numpy.typing as npt
 import torch
 from coreai.runtime import NDArray, StorageKind
+from coreai.runtime._ndarray import _RUNTIME_TO_NUMPY_DTYPE
 from filecheck.matcher import Matcher
 from filecheck.options import Options
 from torch import Tensor
@@ -249,14 +251,11 @@ def _export_and_convert(
     state_names: list[str] | None,
     input_names: list[str] | None,
     output_names: list[str] | None,
-    run_optimize_passes: bool,
     custom_kernels: list | None = None,
 ) -> tuple[Any, Any, list[str]]:
     """Export an nn.Module, run decompositions, and convert to a Core AI program.
 
-    Returns ``(coreai_program, exported_program, fx_output_names)``. Optimizer
-    passes run when the model has buffer/user-input mutations, the caller
-    explicitly requests it, or state_names is supplied.
+    Returns ``(coreai_program, exported_program, fx_output_names)``.
     """
     model.eval()
     exported_program = torch.export.export(
@@ -283,11 +282,6 @@ def _export_and_convert(
     )
     coreai_program = converter.to_coreai()
 
-    sig = exported_program.graph_signature
-    has_state = bool(sig.buffers_to_mutate) or bool(sig.user_inputs_to_mutate)
-    if run_optimize_passes or state_names or has_state:
-        coreai_program.optimize()
-
     output_node = next(
         n for n in exported_program.graph_module.graph.nodes if n.op == "output"
     )
@@ -303,7 +297,9 @@ def _compare_sorted(
     atol: float,
 ) -> None:
     """Path B: compare runtime outputs against torch outputs by sorted key."""
-    coreai_outs_np = [v.numpy() for _, v in sorted(coreai_outs.items())]
+    coreai_outs_np = [
+        _ndarray_to_numpy_array(v) for _, v in sorted(coreai_outs.items())
+    ]
     torch_outs = torch_out if isinstance(torch_out, tuple) else (torch_out,)
     for expected, actual in zip(torch_outs, coreai_outs_np, strict=False):
         np.testing.assert_allclose(
@@ -337,7 +333,7 @@ def _compare_by_name(
                 f"(available: {list(rt_outputs.keys())})"
             )
             np.testing.assert_allclose(
-                rt_outputs[name].numpy(),
+                _ndarray_to_numpy_array(rt_outputs[name]),
                 _torch_tensor_to_numpy_array(torch_out[i]),
                 atol=atol,
                 rtol=rtol,
@@ -348,7 +344,7 @@ def _compare_by_name(
     for i, fx_name in enumerate(fx_output_names):
         if fx_name in rt_outputs and i < len(torch_out):
             np.testing.assert_allclose(
-                rt_outputs[fx_name].numpy(),
+                _ndarray_to_numpy_array(rt_outputs[fx_name]),
                 _torch_tensor_to_numpy_array(torch_out[i]),
                 atol=atol,
                 rtol=rtol,
@@ -389,7 +385,7 @@ async def _execute_and_compare(
             if call_idx == 0 and dump_optests_enabled():
                 assert dump_path is not None
                 for name, arr in state.items():
-                    io_numpy[f"initial_state_{name}"] = arr.numpy()
+                    io_numpy[f"initial_state_{name}"] = _ndarray_to_numpy_array(arr)
 
             torch_out = produce_torch_out(call_idx)
             rt_outputs = await rt_func(inputs=inputs, state=state)
@@ -398,11 +394,11 @@ async def _execute_and_compare(
             if call_idx == 0 and dump_optests_enabled():
                 assert dump_path is not None
                 for name, arr in inputs.items():
-                    io_numpy[name] = arr.numpy()
+                    io_numpy[name] = _ndarray_to_numpy_array(arr)
                 for name, arr in state.items():
-                    io_numpy[f"final_state_{name}"] = arr.numpy()
+                    io_numpy[f"final_state_{name}"] = _ndarray_to_numpy_array(arr)
                 for name, arr in rt_outputs.items():
-                    io_numpy[name] = arr.numpy()
+                    io_numpy[name] = _ndarray_to_numpy_array(arr)
 
                 np.savez(dump_path / "test_data.npz", **io_numpy)
 
@@ -549,7 +545,6 @@ async def validate_numerical_output(**kwargs: Any) -> None:
     print_exported_graph = kwargs.pop("print_exported_graph", False)
     remove_decomps = kwargs.pop("remove_decomps", None)
     prepare_program = kwargs.pop("prepare_program", None)
-    run_optimize_passes = kwargs.pop("run_optimize_passes", False)
     state_names: list[str] | None = kwargs.pop("state_names", None)
     input_names: list[str] | None = kwargs.pop("input_names", None)
     output_names: list[str] | None = kwargs.pop("output_names", None)
@@ -573,7 +568,6 @@ async def validate_numerical_output(**kwargs: Any) -> None:
             state_names=state_names,
             input_names=input_names,
             output_names=output_names,
-            run_optimize_passes=run_optimize_passes,
             custom_kernels=custom_kernels,
         )
 
@@ -637,7 +631,8 @@ def walk_coreai_program(coreai_program):
                     for nested_op in block.operations:
                         walk_operations(nested_op, indent + 1)
 
-    for op in coreai_program._mlir_module.operation.regions[0].blocks[0].operations:
+    module_op = coreai_program._module._mlir_module.operation
+    for op in module_op.regions[0].blocks[0].operations:
         walk_operations(op)
 
 
@@ -646,6 +641,33 @@ def _torch_tensor_to_numpy_array(torch_tensor: torch.Tensor) -> np.ndarray:
     if torch_tensor.dtype == torch.bfloat16:
         torch_tensor = torch_tensor.to(torch.float32)
     return torch_tensor.detach().cpu().numpy()
+
+
+def _ndarray_to_numpy_array(array: NDArray) -> np.ndarray:
+    """Read a runtime NDArray into numpy, upcasting bfloat16 to float32.
+
+    ``NDArray.numpy()`` tries DLPack first and falls back to the buffer protocol
+    for dtypes DLPack cannot describe, but it only catches ``RuntimeError`` and
+    ``SystemError``. NumPy 2.5 raises ``BufferError`` for bfloat16 and float8, so
+    that fallback never runs and the read fails outright. Do the buffer-protocol
+    read ourselves in that case; the runtime's own dtype table keeps the mapping
+    in one place.
+
+    bfloat16 is upcast to float32 so both sides of a comparison land in the same
+    dtype, matching :func:`_torch_tensor_to_numpy_array`.
+    """
+    try:
+        result = array.numpy()
+    except BufferError:
+        np_dtype = _RUNTIME_TO_NUMPY_DTYPE.get(array.dtype, array.dtype)
+        # memoryview().tobytes() gathers strided data in C order, so a
+        # non-contiguous result reads back correctly; frombuffer needs contiguous.
+        buffer = memoryview(array._tensor)
+        raw = buffer if buffer.c_contiguous else buffer.tobytes()
+        result = np.frombuffer(raw, dtype=np.dtype(np_dtype)).reshape(array.shape)
+    if result.dtype == ml_dtypes.bfloat16:
+        return result.astype(np.float32)
+    return result
 
 
 def _mlx_array_to_numpy_array(mlx_array: "mlx.core.array") -> np.ndarray:
@@ -702,5 +724,4 @@ def get_ir(
             decomp_table.pop(decomp)
     program = program.run_decompositions(decomp_table)
     coreai_program = TorchConverter().add_exported_program(program).to_coreai()
-    coreai_program.optimize()
     return str(coreai_program)

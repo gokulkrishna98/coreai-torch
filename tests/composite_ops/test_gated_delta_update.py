@@ -246,7 +246,7 @@ class TestGatedDeltaUpdate:
 
         // CHECK: coreai.invoke @gated_delta_update_[[S]]
         """
-        filecheck_pattern(str(converted_program._mlir_module), check_file=truth)
+        filecheck_pattern(str(converted_program._module._mlir_module), check_file=truth)
 
     @pytest.mark.control_flow
     @pytest.mark.flaky(reruns=3)
