@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+import warnings
+from collections import OrderedDict, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -44,6 +45,7 @@ from ._debug_locations import _DebugInfoRecorder
 from ._torch_metal_kernel import TorchMetalKernel
 from ._utils import (
     _NARROW_TORCH_DTYPE,
+    _externalized_op_name,
     _get_mutation_output_name,
     _get_verify_debuginfo_locations_enabled,
     _ProgressBar,
@@ -345,6 +347,67 @@ class TorchConverter:
         )
         self.exported_program = whole_ep
 
+    def _resolve_source_nodes(
+        self, exts: list[_ExternalizedExportedProgram]
+    ) -> dict[int, list[str]]:
+        """Locate each externalized call site in the programs being converted.
+
+        ``source_nodes`` holds FX node names as they were when the submodules
+        were prepared. The two-step API lets a caller transform the graph
+        between :func:`_subexport_and_restore` and
+        :meth:`add_exported_program`, and a transform that renames nodes leaves
+        those names matching nothing, so the per-node lowerings below are never
+        found. The custom op target survives such transforms, so call sites are
+        located by target instead.
+
+        Several call sites of one op are paired with their
+        :class:`_ExternalizedExportedProgram` in graph order, which is the
+        order they were prepared in. This assumes a transform preserves the
+        relative order of an op's call sites, as renaming and the usual
+        lowering passes do; one that reorders them would pair the wrong way
+        round.
+
+        An op whose call-site count no longer matches keeps its recorded names,
+        since a differing count means the graph changed shape rather than just
+        its names, and pairing by position would then be meaningless.
+        """
+        by_op: dict[str, list[_ExternalizedExportedProgram]] = defaultdict(list)
+        for ext in exts:
+            by_op[ext.op_name].append(ext)
+
+        # A nested submodule's call site lives in its parent's program, not the
+        # whole-model one, so every program is searched. One pass over each,
+        # bucketing by op, keeps this linear in total graph size.
+        programs = [self.exported_program] + [e.exported_program for e in exts]
+        nodes_by_op: dict[str, list[str]] = defaultdict(list)
+        for program in programs:
+            for node in program.graph.nodes:
+                if node.op != "call_function":
+                    continue
+                op_name = _externalized_op_name(node.target)
+                if op_name in by_op:
+                    nodes_by_op[op_name].append(node.name)
+
+        resolved: dict[int, list[str]] = {}
+        for op_name, group in by_op.items():
+            found = nodes_by_op[op_name]
+            if len(found) != len(group):
+                warnings.warn(
+                    f"coreai_torch.externalize: op '{op_name}' has "
+                    f"{len(found)} call site(s) in the programs being "
+                    f"converted but {len(group)} prepared submodule(s). "
+                    f"Falling back to the node names recorded at preparation "
+                    f"time, which a graph transform may have invalidated. "
+                    f"Action: convert the program the submodules were prepared "
+                    f"from, or one derived from it without adding or removing "
+                    f"call sites.",
+                    stacklevel=3,
+                )
+                continue
+            for ext, node_name in zip(group, found):
+                resolved[id(ext)] = [node_name]
+        return resolved
+
     def _perform_externalization(self, context) -> None:
         """Emit externalized submodule graphs and register their lowerings.
 
@@ -363,6 +426,9 @@ class TorchConverter:
             return
 
         whole_program: ExportedProgram = self.exported_program
+        resolved_nodes = self._resolve_source_nodes(
+            self._externalized_exported_programs
+        )
 
         # Process deepest modules first so their lowerings exist
         # when parent modules are built.
@@ -400,7 +466,7 @@ class TorchConverter:
             )
 
             # Register per-node lowering: node.name → coreai.invoke @graph
-            for node_name in ext.source_nodes:
+            for node_name in resolved_nodes.get(id(ext), ext.source_nodes):
                 self._externalized_lowerings[node_name] = (
                     lambda values_map, node, loc, _gop=graph_op: get_invoke_from_graph(
                         values_map, node, loc, _gop

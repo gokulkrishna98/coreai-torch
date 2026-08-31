@@ -4103,3 +4103,101 @@ async def test_externalize_multiple_staged_entries_numerics() -> None:
     await _validate_numerics(
         coreai_program, plain_model, plain_sample, function_name="plain"
     )
+
+
+def test_call_sites_resolved_after_a_renaming_transform() -> None:
+    """A transform between sub-export and conversion may rename every node.
+
+    ``_ExternalizedExportedProgram.source_nodes`` records the names as they
+    were at preparation time, so a lowering keyed on them would find nothing.
+    The two call sites also check that they are matched up in graph order
+    rather than collapsed onto one.
+    """
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = RMSNorm(dim=DIM)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.norm(x) + self.norm(x * 2.0)
+
+    torch.manual_seed(42)
+    model = Model().eval()
+    sample = (torch.randn(2, DIM),)
+
+    _patch_model_for_externalization(
+        model,
+        [
+            ExternalizeSpec(
+                target_class=RMSNormImpl,
+                composite_op_name="rms_norm",
+                composite_attrs=["axes", "eps", "version"],
+            )
+        ],
+    )
+    ep = torch.export.export(model, args=sample).run_decompositions(get_decomp_table())
+    externalized_exported_programs = _subexport_and_restore(model, ep)
+    assert len(externalized_exported_programs) == 2, (
+        f"expected one entry per call site, got {len(externalized_exported_programs)}"
+    )
+
+    recorded = [
+        name for ext in externalized_exported_programs for name in ext.source_nodes
+    ]
+    # Only the call sites need renaming to invalidate source_nodes; the graph
+    # signature keys placeholders and outputs by name, so leave those alone.
+    for index, node in enumerate(ep.graph.nodes):
+        if node.op == "call_function":
+            node.name = f"renamed_{index}"
+    assert not (set(recorded) & {node.name for node in ep.graph.nodes}), (
+        "the rename should have invalidated every recorded name"
+    )
+
+    coreai_program = (
+        TorchConverter()
+        .add_exported_program(
+            ep, _externalized_exported_programs=externalized_exported_programs
+        )
+        .to_coreai()
+    )
+
+    pattern = """
+    // CHECK-COUNT-2: coreai.invoke
+    """
+    filecheck_pattern(str(coreai_program.get_graph("main")), pattern)
+
+
+def test_mismatched_call_site_count_warns_and_falls_back() -> None:
+    """A graph that gained or lost call sites cannot be paired by position.
+
+    Resolution is skipped for that op and the recorded names are used, which
+    is unlikely to work, so the fallback says so rather than failing later
+    with an unhandled custom op.
+    """
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = RMSNorm(dim=DIM)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.norm(x)
+
+    torch.manual_seed(42)
+    model = Model().eval()
+    sample = (torch.randn(2, DIM),)
+
+    _patch_model_for_externalization(model, [ExternalizeSpec(target_class=RMSNormImpl)])
+    ep = torch.export.export(model, args=sample).run_decompositions(get_decomp_table())
+    externalized_exported_programs = _subexport_and_restore(model, ep)
+
+    # Stand in for a transform that dropped a call site: one prepared
+    # submodule too many for the graph being converted.
+    duplicated = externalized_exported_programs * 2
+
+    converter = TorchConverter().add_exported_program(
+        ep, _externalized_exported_programs=duplicated
+    )
+    with pytest.warns(UserWarning, match="prepared submodule"):
+        converter.to_coreai()
