@@ -10,7 +10,7 @@ from coreai_torch import TorchConverter, get_decomp_table
 
 `TorchConverter` traverses the exported FX graph of a PyTorch model, maps ATen operators to Core AI operations, and emits an `AIProgram` ready for on-device execution.
 
-Load a model using `add_exported_program()` or `add_pytorch_module()`, then call `to_coreai()` to produce the artifact. Register custom lowerings with `register_torch_lowering()` for ops that have no built-in mapping, and supply Metal kernel source for compute-intensive operations with `register_custom_kernels()`.
+Load a model using `add_exported_program()` or `add_pytorch_module()`, then call `to_coreai()` to produce the artifact. The returned program is already optimized — there is no separate optimization step. Register custom lowerings with `register_torch_lowering()` for ops that have no built-in mapping, and supply Metal kernel source for compute-intensive operations with `register_custom_kernels()`.
 
 ---
 
@@ -145,6 +145,8 @@ Converts the loaded program into a Core AI `AIProgram`. This is the main entry p
 | `entrypoints` | `Sequence[str] \| None` | `None` | If provided, only convert programs with these entrypoint names. If `None`, convert all staged programs. |
 
 **Returns:** `AIProgram` — a compiled Core AI model ready for deployment and execution.
+
+The returned program is already optimized. `AIProgram.optimize()` has been removed — there is no separate optimization step to call.
 
 **Example:**
 

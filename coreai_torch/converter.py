@@ -884,6 +884,9 @@ class TorchConverter:
         It creates a Core AI module, processes staged entries (from ``add_exported_program``
         and ``add_pytorch_module`` calls), and generates graph operations.
 
+        The returned ``AIProgram`` is already optimized. There is no separate
+        optimization step to call.
+
         Staged programs persist after conversion. Call ``clear()`` to remove them.
 
         Args:
@@ -891,7 +894,7 @@ class TorchConverter:
                   If None, convert all staged programs.
 
         Returns:
-            An AIProgram containing the converted Core AI model
+            An optimized AIProgram containing the converted Core AI model
 
         Raises:
             RuntimeError: If no programs have been staged via ``add_exported_program()``
