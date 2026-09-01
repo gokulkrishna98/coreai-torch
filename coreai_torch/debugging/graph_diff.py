@@ -554,8 +554,8 @@ def op_id_alignment(
         The correspondence, and what it leaves over.
 
     """
-    before_graph = _build_module_graph(before._mlir_module, entry_point)
-    after_graph = _build_module_graph(after._mlir_module, entry_point)
+    before_graph = _build_module_graph(before._module._mlir_module, entry_point)
+    after_graph = _build_module_graph(after._module._mlir_module, entry_point)
     alignment = align(before_graph, after_graph, weights=weights)
 
     before_ids = _coreai_ids(before_graph)
@@ -1063,8 +1063,8 @@ def compute_coreai_program_diff(
         ValueError: If entry point is not found in either program
 
     """
-    source_graph = _build_module_graph(source_program._mlir_module, entry_point)
-    target_graph = _build_module_graph(target_program._mlir_module, entry_point)
+    source_graph = _build_module_graph(source_program._module._mlir_module, entry_point)
+    target_graph = _build_module_graph(target_program._module._mlir_module, entry_point)
     return compute_graph_diff(source_graph, target_graph, weights=weights)
 
 
@@ -1213,19 +1213,19 @@ def compute_per_graph_diff(
         List of (label, GraphDiff | None) tuples for each graph in the programs
 
     """
-    source_eps = _collect_entry_points(source_program._mlir_module)
-    target_eps = _collect_entry_points(target_program._mlir_module)
+    source_eps = _collect_entry_points(source_program._module._mlir_module)
+    target_eps = _collect_entry_points(target_program._module._mlir_module)
     # Fallback when no main graph exists
     if "main" not in source_eps or "main" not in target_eps:
-        source_graph = _build_module_graph(source_program._mlir_module)
-        target_graph = _build_module_graph(target_program._mlir_module)
+        source_graph = _build_module_graph(source_program._module._mlir_module)
+        target_graph = _build_module_graph(target_program._module._mlir_module)
         return [
             ("all", compute_graph_diff(source_graph, target_graph, weights=weights))
         ]
 
     # Diff main graphs
-    source_main_graph = _build_module_graph(source_program._mlir_module, "main")
-    target_main_graph = _build_module_graph(target_program._mlir_module, "main")
+    source_main_graph = _build_module_graph(source_program._module._mlir_module, "main")
+    target_main_graph = _build_module_graph(target_program._module._mlir_module, "main")
     main_diff = compute_graph_diff(
         source_main_graph, target_main_graph, weights=weights
     )
@@ -1244,8 +1244,8 @@ def compute_per_graph_diff(
             matched_composites,
             source_eps,
             target_eps,
-            source_program._mlir_module,
-            target_program._mlir_module,
+            source_program._module._mlir_module,
+            target_program._module._mlir_module,
             weights,
         )
     )
@@ -1270,8 +1270,8 @@ def compute_per_graph_diff(
             target_eps,
             matched_src_callees,
             matched_tgt_callees,
-            source_program._mlir_module,
-            target_program._mlir_module,
+            source_program._module._mlir_module,
+            target_program._module._mlir_module,
             weights,
         )
     )

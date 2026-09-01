@@ -155,7 +155,7 @@ def test_intermediate_ops_of_a_lowering_keep_their_attribution() -> None:
 
     matmuls = [
         operation
-        for operation in _get_nested_operations(program._mlir_module.operation)
+        for operation in _get_nested_operations(program._module._mlir_module.operation)
         if "batch_matmul" in operation.name
     ]
     assert matmuls, "expected the linear layers to lower to batch matmuls"
