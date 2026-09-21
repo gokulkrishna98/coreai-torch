@@ -6635,6 +6635,68 @@ class TestScaledDotProductAttentionIR:
             """,
         )
 
+    def test_composite_equal_head_dims(self) -> None:
+        """D_v == D_k lowers to the scaled_dot_product_attention composite."""
+
+        class SdpaModel(nn.Module):
+            def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+                return torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, enable_gqa=True
+                )
+
+        ir = get_ir(
+            SdpaModel().eval(),
+            remove_decomps=[torch.ops.aten.scaled_dot_product_attention.default],
+            q=torch.rand(2, 4, 3, 32),
+            k=torch.rand(2, 4, 5, 32),
+            v=torch.rand(2, 4, 5, 32),
+        )
+        filecheck_pattern(
+            ir,
+            check_file="""
+                // CHECK-LABEL: module {
+                // CHECK:         coreai.graph private noinline @sdpa_maskless{{.*}}(%[[Q:.*]]: tensor<2x4x3x32xf32>{{.*}}, %[[K:.*]]: tensor<2x4x5x32xf32>{{.*}}, %[[V:.*]]: tensor<2x4x5x32xf32>{{.*}}) -> tensor<2x4x3x32xf32> attributes {{.*}}composite_decl = #coreai.composite_declaration<"scaled_dot_product_attention"{{.*}}
+                // CHECK:           coreai.output {{.*}} : tensor<2x4x3x32xf32>
+                // CHECK:         coreai.graph @main
+                // CHECK:           %[[R:.*]] = coreai.invoke @sdpa_maskless
+                // CHECK:           coreai.output %[[R]] : tensor<2x4x3x32xf32>
+            """,
+        )
+
+    def test_direct_lowering_when_value_head_dim_differs(self) -> None:
+        """D_v != D_k cannot use the composite — it is lowered inline in @main."""
+
+        class SdpaModel(nn.Module):
+            def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+                return torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, enable_gqa=True
+                )
+
+        ir = get_ir(
+            SdpaModel().eval(),
+            remove_decomps=[torch.ops.aten.scaled_dot_product_attention.default],
+            q=torch.rand(2, 4, 3, 32),
+            k=torch.rand(2, 4, 5, 32),
+            v=torch.rand(2, 4, 5, 24),
+        )
+        assert "composite_declaration" not in ir
+        assert "coreai.invoke" not in ir
+        filecheck_pattern(
+            ir,
+            check_file="""
+                // CHECK-LABEL: module {
+                // CHECK-NEXT:   coreai.graph @main(%[[Q:.*]]: tensor<2x4x3x32xf32> {coreai.name = "q"}, %[[K:.*]]: tensor<2x4x5x32xf32> {coreai.name = "k"}, %[[V:.*]]: tensor<2x4x5x24xf32> {coreai.name = "v"}) -> (tensor<2x4x3x24xf32> {coreai.name = "{{.*}}"}){{.*}} {
+                // CHECK:           coreai.decomposable.broadcasting_mul
+                // CHECK:           coreai.transpose
+                // CHECK:           coreai.decomposable.broadcasting_batch_matmul
+                // CHECK:           coreai.softmax
+                // CHECK:           %[[R:.*]] = coreai.decomposable.broadcasting_batch_matmul {{.*}} -> tensor<2x4x3x24xf32>
+                // CHECK:           coreai.output %[[R]] : tensor<2x4x3x24xf32>
+                // CHECK-NEXT:    }
+                // CHECK-NEXT:  }
+            """,
+        )
+
 
 class TestScatterIR:
     def test_src(self) -> None:
