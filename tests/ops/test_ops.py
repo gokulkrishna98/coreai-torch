@@ -7791,6 +7791,27 @@ class TestSDPA:
             **kwargs,
         )
 
+    async def test_sdpa_dynamic_head_dim(self) -> None:
+        """A dynamic head dim is not provably equal to D_v — lowered directly."""
+
+        class SDPAModule(nn.Module):
+            def forward(self, query: Tensor, key: Tensor, value: Tensor) -> Tensor:
+                return nn.functional.scaled_dot_product_attention(query, key, value)
+
+        head_dim = torch.export.Dim("head_dim", min=8, max=64)
+        await validate_numerical_output(
+            model=SDPAModule().eval(),
+            query=torch.rand(2, 4, 3, 32),
+            key=torch.rand(2, 4, 5, 32),
+            value=torch.rand(2, 4, 5, 32),
+            dynamic_shapes={
+                "query": {3: head_dim},
+                "key": {3: head_dim},
+                "value": {3: head_dim},
+            },
+            remove_decomps=[torch.ops.aten.scaled_dot_product_attention.default],
+        )
+
 
 # ndim (number of padded spatial dims) -> the aten op that must be preserved
 # so the reflect/replicate lowering (coreai.pad) is exercised end to end.

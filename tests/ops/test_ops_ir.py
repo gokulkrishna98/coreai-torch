@@ -6697,6 +6697,37 @@ class TestScaledDotProductAttentionIR:
             """,
         )
 
+    def test_direct_lowering_when_head_dim_dynamic(self) -> None:
+        """A dynamic head dim can't be proven equal to D_v, so no composite."""
+
+        class SdpaModel(nn.Module):
+            def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+                return torch.nn.functional.scaled_dot_product_attention(q, k, v)
+
+        head_dim = torch.export.Dim("head_dim", min=8, max=64)
+        ir = get_ir(
+            SdpaModel().eval(),
+            dynamic_shapes={"q": {3: head_dim}, "k": {3: head_dim}, "v": {3: head_dim}},
+            remove_decomps=[torch.ops.aten.scaled_dot_product_attention.default],
+            q=torch.rand(2, 4, 3, 32),
+            k=torch.rand(2, 4, 5, 32),
+            v=torch.rand(2, 4, 5, 32),
+        )
+        assert "composite_declaration" not in ir
+        assert "coreai.invoke" not in ir
+        filecheck_pattern(
+            ir,
+            check_file="""
+                // CHECK-LABEL: module {
+                // CHECK-NEXT:   coreai.graph @main(%[[Q:.*]]: tensor<2x4x3x?xf32> {coreai.name = "q"}, %[[K:.*]]: tensor<2x4x5x?xf32> {coreai.name = "k"}, %[[V:.*]]: tensor<2x4x5x?xf32> {coreai.name = "v"}) -> (tensor<2x4x3x?xf32> {coreai.name = "{{.*}}"}){{.*}} {
+                // CHECK:           coreai.softmax
+                // CHECK:           %[[R:.*]] = coreai.decomposable.broadcasting_batch_matmul {{.*}} -> tensor<2x4x3x?xf32>
+                // CHECK:           coreai.output %[[R]] : tensor<2x4x3x?xf32>
+                // CHECK-NEXT:    }
+                // CHECK-NEXT:  }
+            """,
+        )
+
 
 class TestScatterIR:
     def test_src(self) -> None:

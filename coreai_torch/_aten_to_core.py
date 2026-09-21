@@ -3434,8 +3434,9 @@ def replace_sdpa(values_map: dict[str, Value], node: fx.Node, loc: Location) -> 
         6. attn_weights = softmax(attn_scores, dim=-1)
         7. output = matmul(attn_weights, value)
 
-    When the value head dim differs from the query/key head dim (D_v != D_k),
-    the composite is skipped and the decomposition is emitted directly.
+    The composite is only used when the value head dim is provably equal to
+    the query/key head dim; otherwise (D_v != D_k, or a head dim that is
+    dynamic) the decomposition is emitted directly.
     """
 
     args = node.args
@@ -3504,10 +3505,12 @@ def replace_sdpa(values_map: dict[str, Value], node: fx.Node, loc: Location) -> 
     k_shape = key.type.shape
     v_shape = value.type.shape
 
-    if q_shape[3] >= 0 and v_shape[3] >= 0 and q_shape[3] != v_shape[3]:
+    if not (q_shape[3] >= 0 and v_shape[3] >= 0 and q_shape[3] == v_shape[3]):
         # The composite op's interface requires the attention output to carry
-        # the query head dim, which does not hold when D_v != D_k (MLA-style
-        # attention). Lower the decomposition directly instead.
+        # the query head dim, so it can only be used when D_v and D_k are
+        # provably equal. Otherwise — D_v != D_k (MLA-style attention), or a
+        # dynamic head dim we cannot prove equal — lower the decomposition
+        # directly.
         result = _sdpa_decompose(
             query,
             key,
